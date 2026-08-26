@@ -111,3 +111,74 @@ dataloader:
   num_workers: 4
   pin_memory: true
   shuffle_train: true
+
+# ---------------------------------------------------------------------------
+# Raw dataset audit configuration (src/data/audit_dataset.py and friends).
+# The audit is strictly READ-ONLY with respect to data/raw/ — it never
+# renames, moves, deletes, resizes, or otherwise modifies raw files.
+# ---------------------------------------------------------------------------
+audit:
+  # File extensions considered images for inventory purposes (lowercase,
+  # with leading dot). Extend if other formats are added to data/raw/.
+  supported_extensions: [".jpg", ".jpeg"]
+
+  # Policy per issue type: "fail" makes `python run_pipeline.py audit` exit
+  # non-zero when the issue is found; "warn" surfaces it in the reports and
+  # summary but does not fail the run. Cross-class exact duplicates and any
+  # structural mismatch default to "fail" because they indicate a serious
+  # data-quality problem that must be resolved by a human before splitting.
+  policies:
+    missing_class_directory: fail
+    unexpected_directory: fail
+    corrupted_image: fail
+    cross_class_duplicate: fail
+    same_class_duplicate: warn
+    highly_suspicious_augmentation_family: warn
+
+  # Keywords checked as whole-word (case-insensitive) matches against each
+  # image's filename and immediate parent directory name, in addition to
+  # structural heuristics (e.g. OS-style "(1)"/"copy" suffixes) implemented
+  # directly in src/data/detect_augmented_families.py. Not exhaustive by
+  # design — extend this list as new naming conventions are observed rather
+  # than hard-coding more words into source.
+  augmentation_keywords:
+    - augmented
+    - augmentation
+    - flip
+    - flipped
+    - mirrored
+    - rotate
+    - rotated
+    - rotation
+    - brightness
+    - contrast
+    - crop
+    - cropped
+    - zoom
+    - zoomed
+    - noise
+    - noisy
+    - blur
+    - blurred
+    - copy
+    - duplicate
+    - variant
+    - synthetic
+    - generated
+    - gan
+    - stylegan
+    - fake
+    - warp
+    - warped
+    - jitter
+    - jittered
+    - shear
+    - sheared
+    - translate
+    - translated
+    - elastic
+    - perturbed
+    - perturbation
+    - resampled
+    - upsampled
+    - oversampled

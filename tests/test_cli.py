@@ -16,7 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import run_pipeline  # noqa: E402
+from tests.conftest import make_image, make_invalid_image, write_min_dataset_config  # noqa: E402
 
+# "audit" is implemented (see test_main_audit_command_* below); every other
+# command is still recognized by the parser but not yet implemented.
 ALL_COMMANDS = [
     "audit",
     "prepare_dataset",
@@ -30,6 +33,8 @@ ALL_COMMANDS = [
     "publication",
     "final_test",
 ]
+
+UNIMPLEMENTED_COMMANDS = [c for c in ALL_COMMANDS if c != "audit"]
 
 MODEL_COMMANDS = ["baseline", "train"]
 
@@ -103,7 +108,7 @@ def test_parser_requires_a_command():
         parser.parse_args([])
 
 
-@pytest.mark.parametrize("command", ALL_COMMANDS)
+@pytest.mark.parametrize("command", UNIMPLEMENTED_COMMANDS)
 def test_main_fails_clearly_for_unimplemented_commands(command, capsys):
     exit_code = run_pipeline.main([command])
     assert exit_code == 1
@@ -118,3 +123,38 @@ def test_main_fails_clearly_for_unimplemented_model_commands(command, capsys):
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "NOT IMPLEMENTED" in captured.err
+
+
+# --- "audit" is implemented: exercise it end-to-end against a tiny fixture
+# dataset (never the real data/raw/) via an explicit --config override. ---
+
+
+def test_main_audit_command_passes_on_clean_fixture(tmp_path):
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    make_image(raw_dir / "Alpha" / "a1.jpg")
+    make_image(raw_dir / "Beta" / "b1.jpg")
+    config_path = write_min_dataset_config(
+        tmp_path, {"Alpha": "Alpha", "Beta": "Beta"}, raw_dir, audit_dir
+    )
+
+    exit_code = run_pipeline.main(["audit", "--config", str(config_path)])
+
+    assert exit_code == 0
+    assert (audit_dir / "dataset_inventory.csv").exists()
+
+
+def test_main_audit_command_fails_clearly_on_policy_violation(tmp_path, capsys):
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    make_invalid_image(raw_dir / "Alpha" / "broken.jpg")
+    make_image(raw_dir / "Beta" / "b1.jpg")
+    config_path = write_min_dataset_config(
+        tmp_path, {"Alpha": "Alpha", "Beta": "Beta"}, raw_dir, audit_dir
+    )
+
+    exit_code = run_pipeline.main(["audit", "--config", str(config_path)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "AUDIT FAILED" in captured.err

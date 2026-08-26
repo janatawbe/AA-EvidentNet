@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """AA-EvidentNet pipeline CLI.
 
-This is the single entry point for the project's experiment pipeline. At
-this stage (foundation setup), the CLI structure and argument parsing are
-complete, but the underlying pipeline stages are not yet implemented. Each
-command fails with a clear NotImplementedError-derived message rather than
-doing nothing silently.
+This is the single entry point for the project's experiment pipeline. The
+`audit` command (raw dataset audit) is implemented; every other command is
+recognized by the CLI but not yet implemented, and fails with a clear
+NotImplementedError-derived message rather than doing nothing silently.
 
 Usage:
     python run_pipeline.py <command> [options]
@@ -21,7 +20,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.utils.seeding import DEFAULT_SEED  # noqa: E402
+from src.utils.seeding import DEFAULT_SEED, set_seed  # noqa: E402
+from src.data.audit_dataset import (  # noqa: E402
+    AuditConfigError,
+    AuditFailedError,
+    run_dataset_audit,
+)
 
 
 class PipelineNotImplementedError(NotImplementedError):
@@ -138,11 +142,15 @@ def not_implemented(command: str, target_module: str) -> None:
     )
 
 
+def run_audit(args: argparse.Namespace) -> None:
+    run_dataset_audit(config_path=args.config)
+
+
 def dispatch(args: argparse.Namespace) -> None:
     command = args.command
 
     handlers = {
-        "audit": lambda: not_implemented(command, "src/data (dataset audit)"),
+        "audit": lambda: run_audit(args),
         "prepare_dataset": lambda: not_implemented(command, "src/data (dataset preparation)"),
         "baseline": lambda: not_implemented(command, "src/models + src/training (baseline models)"),
         "train": lambda: not_implemented(command, "src/models + src/training (AA-EvidentNet)"),
@@ -164,10 +172,18 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    set_seed(args.seed)
+
     try:
         dispatch(args)
     except PipelineNotImplementedError as e:
         print(f"[run_pipeline] NOT IMPLEMENTED: {e}", file=sys.stderr)
+        return 1
+    except AuditConfigError as e:
+        print(f"[run_pipeline] AUDIT CONFIG ERROR: {e}", file=sys.stderr)
+        return 1
+    except AuditFailedError as e:
+        print(f"[run_pipeline] AUDIT FAILED: {e}", file=sys.stderr)
         return 1
 
     return 0
