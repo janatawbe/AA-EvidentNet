@@ -6,6 +6,8 @@
 # https://pytorch.org/get-started/locally/ and REPRODUCIBILITY.md.
 
 torch==2.10.0          # CPU-only wheel in the reference environment (torch==2.10.0+cpu)
+torchvision==0.25.0    # pinned to match torch==2.10.0; do not `pip install torchvision` unpinned - it will pull a newer torch
+timm==1.0.28           # ResNet50/EfficientNetB0/MaxViT backbones with ImageNet-pretrained weights
 numpy==2.2.6
 pandas==2.3.3
 pillow==12.1.1

@@ -57,9 +57,18 @@ num_classes: 10
 
 image:
   size: 224
+  # Runtime (Task 5) preprocessing resizes the shorter side to resize_size,
+  # then center-crops to `size` - standard ImageNet-style preprocessing,
+  # deterministic for train/val/test alike. This is separate from the
+  # offline training-only augmentation pipeline (Task 4,
+  # src/data/generate_balanced_dataset.py) which already ran once to
+  # produce data/manifests/train_balanced.csv; this resize/crop step never
+  # introduces randomness.
+  resize_size: 256
   channels: 3
-  # PROVISIONAL; not yet computed from the actual dataset. Revisit once the
-  # data audit runs.
+  # PROVISIONAL; not yet computed from the actual dataset. Using ImageNet
+  # statistics by default since the baseline backbones (ResNet50,
+  # EfficientNetB0, MaxViT) use ImageNet-pretrained weights.
   normalize_mean: [0.485, 0.456, 0.406]
   normalize_std: [0.229, 0.224, 0.225]
 

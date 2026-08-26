@@ -38,6 +38,7 @@ from src.data.generate_balanced_dataset import (  # noqa: E402
     BalancedDatasetValidationError,
     run_generate_balanced_dataset,
 )
+from src.models.model_check import ModelCheckError, run_model_check  # noqa: E402
 
 
 class PipelineNotImplementedError(NotImplementedError):
@@ -47,6 +48,7 @@ class PipelineNotImplementedError(NotImplementedError):
 DEFAULT_CONFIGS = {
     "audit": "configs/dataset.yaml",
     "prepare_dataset": "configs/dataset.yaml",
+    "model_check": "configs/models.yaml",
     "baseline": "configs/models.yaml",
     "train": "configs/models.yaml",
     "ablation": "configs/experiments.yaml",
@@ -116,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = [
         ("audit", "Run the dataset audit (class counts, duplicates, corruption, leakage checks)."),
         ("prepare_dataset", "Build processed dataset splits and manifests from data/raw."),
+        ("model_check", "Instantiate baseline models with a synthetic batch and report shapes/param counts (no training)."),
         ("baseline", "Train/evaluate a baseline model (e.g. MaxViT)."),
         ("train", "Train the proposed AA-EvidentNet model."),
         ("ablation", "Run ablation studies over AA-EvidentNet components."),
@@ -139,6 +142,19 @@ def build_parser() -> argparse.ArgumentParser:
                 required=True,
                 help="Model name (see configs/models.yaml registry, "
                 "e.g. 'maxvit' or 'aa_evidentnet').",
+            )
+        if name == "model_check":
+            sub.add_argument(
+                "--pretrained",
+                action="store_true",
+                help="Also verify ImageNet-pretrained weights can be downloaded/instantiated "
+                "for each baseline. Requires internet access. Default: offline (pretrained=False).",
+            )
+            sub.add_argument(
+                "--output-csv",
+                type=str,
+                default="results/tables/model_parameters.csv",
+                help="Where to write the parameter/feature report (default: %(default)s).",
             )
 
     return parser
@@ -183,12 +199,17 @@ def run_prepare_dataset(args: argparse.Namespace) -> None:
     run_generate_balanced_dataset(config_path=args.config, seed=args.seed)
 
 
+def run_model_check_command(args: argparse.Namespace) -> None:
+    run_model_check(config_path=args.config, check_pretrained=args.pretrained, output_csv=args.output_csv)
+
+
 def dispatch(args: argparse.Namespace) -> None:
     command = args.command
 
     handlers = {
         "audit": lambda: run_audit(args),
         "prepare_dataset": lambda: run_prepare_dataset(args),
+        "model_check": lambda: run_model_check_command(args),
         "baseline": lambda: not_implemented(command, "src/models + src/training (baseline models)"),
         "train": lambda: not_implemented(command, "src/models + src/training (AA-EvidentNet)"),
         "ablation": lambda: not_implemented(command, "src/training (ablation runner)"),
@@ -233,6 +254,9 @@ def main(argv=None) -> int:
         return 1
     except BalancedDatasetValidationError as e:
         print(f"[run_pipeline] BALANCED DATASET VALIDATION FAILED: {e}", file=sys.stderr)
+        return 1
+    except ModelCheckError as e:
+        print(f"[run_pipeline] MODEL CHECK FAILED: {e}", file=sys.stderr)
         return 1
 
     return 0

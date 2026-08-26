@@ -18,12 +18,14 @@ sys.path.insert(0, str(REPO_ROOT))
 import run_pipeline  # noqa: E402
 from tests.conftest import make_image, make_invalid_image, write_min_dataset_config  # noqa: E402
 
-# "audit" and "prepare_dataset" are implemented (see test_main_audit_command_*
-# and test_main_prepare_dataset_command_* below); every other command is
-# still recognized by the parser but not yet implemented.
+# "audit", "prepare_dataset", and "model_check" are implemented (see
+# test_main_audit_command_*, test_main_prepare_dataset_command_*, and
+# test_main_model_check_command_* below); every other command is still
+# recognized by the parser but not yet implemented.
 ALL_COMMANDS = [
     "audit",
     "prepare_dataset",
+    "model_check",
     "ablation",
     "hard_pairs",
     "calibration",
@@ -35,7 +37,7 @@ ALL_COMMANDS = [
     "final_test",
 ]
 
-IMPLEMENTED_COMMANDS = {"audit", "prepare_dataset"}
+IMPLEMENTED_COMMANDS = {"audit", "prepare_dataset", "model_check"}
 UNIMPLEMENTED_COMMANDS = [c for c in ALL_COMMANDS if c not in IMPLEMENTED_COMMANDS]
 
 MODEL_COMMANDS = ["baseline", "train"]
@@ -227,3 +229,26 @@ def test_main_prepare_dataset_command_fails_clearly_for_fatal_config_error(tmp_p
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "AUDIT CONFIG ERROR" in captured.err
+
+
+# --- "model_check" is implemented: offline, pretrained=False by default,
+# fast, no dataset fixture needed (it only synthesizes tensors). ---
+
+
+def test_main_model_check_command_passes_offline(tmp_path):
+    output_csv = tmp_path / "model_parameters.csv"
+    exit_code = run_pipeline.main(
+        ["model_check", "--config", "configs/models.yaml", "--output-csv", str(output_csv)]
+    )
+    assert exit_code == 0
+    assert output_csv.exists()
+
+
+def test_main_model_check_command_default_is_offline_not_pretrained(tmp_path, capsys):
+    output_csv = tmp_path / "model_parameters.csv"
+    exit_code = run_pipeline.main(
+        ["model_check", "--config", "configs/models.yaml", "--output-csv", str(output_csv)]
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "pretrained=False" in captured.out

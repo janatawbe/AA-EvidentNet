@@ -1,32 +1,68 @@
-# Model configuration.
+# Model configuration for AA-EvidentNet baselines.
 #
-# NOTE: No model architectures are implemented yet. This config only
-# reserves the parameter surface so training/eval code can be written
-# against a stable schema. Values are PROVISIONAL defaults.
+# All three baselines (ResNet50, EfficientNetB0, MaxViT) are implemented as
+# a single uniform wrapper around timm.create_model
+# (src/models/base.py: TimmBackboneModel), so architecture differences
+# never leak into training/evaluation code - every model exposes the same
+# forward(images) / forward(images, return_features=True) interface.
+# `embedding_dim` below is informational (for readers/docs); the actual
+# feature dimension used at runtime is always read from the instantiated
+# model itself (backbone.num_features), never hard-coded elsewhere.
 
 seed: 42
-
-embedding_dim: 256
 num_classes: 10
 image_size: 224
 
-baseline:
-  name: maxvit
-  # PROVISIONAL: exact MaxViT variant (tiny/small/base) not yet decided.
-  variant: maxvit_t
-  pretrained: true
-  freeze_backbone: false
+baselines:
+  resnet50:
+    architecture: resnet50           # timm model name
+    library: timm
+    pretrained: true
+    num_classes: 10
+    image_size: 224
+    dropout: 0.0
+    embedding_dim: 2048              # informational; see backbone.num_features
 
+  efficientnetb0:
+    architecture: efficientnet_b0
+    library: timm
+    pretrained: true
+    num_classes: 10
+    image_size: 224
+    dropout: 0.0
+    embedding_dim: 1280
+
+  maxvit:
+    # maxvit_tiny_tf_224: the smallest MaxViT-TF variant with native
+    # 224x224 ImageNet-1k pretrained weights available in timm
+    # (maxvit_tiny_tf_224.in1k), chosen to fit the target RTX 3050 6GB
+    # (~30M params - a similar memory footprint to ResNet50/EfficientNetB0
+    # at this resolution). This is a deliberate hardware-driven default,
+    # not a scientifically tuned choice; verified against the installed
+    # timm==1.0.28 (`timm.list_models('maxvit_tiny_tf_224*', pretrained=True)`)
+    # rather than assumed.
+    architecture: maxvit_tiny_tf_224
+    library: timm
+    pretrained: true
+    num_classes: 10
+    image_size: 224
+    dropout: 0.0
+    embedding_dim: 512
+
+# ---------------------------------------------------------------------------
+# AA-EvidentNet (proposed model) - NOT YET IMPLEMENTED. Placeholder schema
+# only, reserved for a later task. Do not build against this section yet.
+# ---------------------------------------------------------------------------
 proposed:
   name: aa_evidentnet
-  # PROVISIONAL placeholder architecture description; not yet implemented.
-  backbone: maxvit_t
+  backbone: maxvit_tiny_tf_224
   pretrained: true
   uncertainty_head: evidential
   mc_samples: 20
 
 registry:
-  # Maps CLI --model values to config sections above. Extend as new models
-  # are added; do not implement model code until this task's scope allows it.
-  maxvit: baseline
-  aa_evidentnet: proposed
+  # Maps CLI --model values / create_model() names to baselines.* entries
+  # above. Extend as new models are added.
+  resnet50: baselines.resnet50
+  efficientnetb0: baselines.efficientnetb0
+  maxvit: baselines.maxvit

@@ -46,6 +46,14 @@ Verified in this project's development environment (2026-08-26):
   with an NVIDIA GPU, install a matching CUDA build of torch instead (see
   https://pytorch.org/get-started/locally/) and expect some numerical
   differences vs. CPU-only runs.
+- torchvision: 0.25.0+cpu, timm: 1.0.28 (added for Task 5 — model
+  infrastructure). **Pinned deliberately**: an unpinned
+  `pip install torchvision` resolves the latest torchvision (0.28.0 at
+  time of writing), which in turn upgrades torch itself (observed: torch
+  2.10.0 -> 2.13.0). To add torchvision without upgrading torch, always
+  install both together with torch pinned:
+  `pip install torch==2.10.0 torchvision==0.25.0` (0.25.0 is the
+  torchvision release that pairs with torch 2.10.0).
 - numpy 2.2.6, pandas 2.3.3, pillow 12.1.1, PyYAML 6.0.3,
   scikit-learn 1.7.2, pytest 9.1.1
 
@@ -53,6 +61,30 @@ Exact pins live in `requirements.txt` / `environment.yml`. Every run should
 also capture live environment info via
 `src/utils/env_info.collect_environment_info()`, since pinned files describe
 intent, not necessarily what was actually installed at run time.
+
+## Model reproducibility (Task 5)
+
+- Baseline model architectures (`src/models/factory.py: create_model`) are
+  entirely config-driven (`configs/models.yaml: baselines.*` — backbone
+  name, `pretrained`, `num_classes`, `dropout`); no architecture constant
+  is duplicated in source.
+- `python run_pipeline.py model_check` (and the pytest suite) always use
+  `pretrained=False` by default — fully offline, deterministic given a
+  fixed torch/timm version, no network access or weight download
+  required. `feature_dim` and parameter counts in
+  `results/tables/model_parameters.csv` are read from the actually
+  instantiated model, never hand-typed. The MaxViT variant
+  (`maxvit_tiny_tf_224`, pretrained tag `.in1k`) was checked against the
+  installed `timm==1.0.28` (`timm.list_models(..., pretrained=True)`)
+  rather than assumed to exist.
+- `--pretrained` on `model_check` additionally downloads real
+  ImageNet-pretrained weights — this is the one place in this project
+  that requires internet access, and it is never invoked by the default
+  `pytest` suite or by `prepare_dataset`.
+- No model has been trained yet, so weight-initialization and
+  training-loop reproducibility are not yet applicable — only
+  architecture instantiation and the forward-pass interface are verified
+  at this stage.
 
 ## Configuration hashing
 

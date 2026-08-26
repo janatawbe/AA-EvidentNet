@@ -29,17 +29,21 @@ calibration, selective prediction, robustness, and interpretability.
 These are the questions the pipeline is being built to answer — not claims
 about what the answers are.
 
-## Planned architecture (not yet implemented)
+## Planned architecture
 
-- **Baseline**: MaxViT-based image classifier with a standard softmax /
-  cross-entropy head.
-- **Proposed (AA-EvidentNet)**: same or comparable backbone, with an
-  evidential (Dirichlet-based) uncertainty head trained with an evidential
-  loss, evaluated with Monte Carlo sampling for uncertainty estimates.
+- **Baselines (implemented, not yet trained)**: ResNet50, EfficientNetB0,
+  and MaxViT (`maxvit_tiny_tf_224`), each with a standard softmax /
+  cross-entropy head. See "Baseline models" below.
+- **Proposed (AA-EvidentNet, not yet implemented)**: same or comparable
+  backbone, with an evidential (Dirichlet-based) uncertainty head trained
+  with an evidential loss, evaluated with Monte Carlo sampling for
+  uncertainty estimates.
 
-Exact architecture details, hyperparameters, and loss formulations are
-**provisional** (see `configs/`) and will be finalized based on the data
-audit and baseline experiments, not fixed in advance.
+Exact architecture details, hyperparameters, and loss formulations for the
+proposed model are **provisional** (see `configs/`) and will be finalized
+based on baseline experiments, not fixed in advance. No model has been
+trained and no performance has been measured or reported anywhere in this
+repository yet.
 
 ## Dataset assumptions
 
@@ -367,6 +371,109 @@ it is built from `train_original.csv`, which currently excludes the 942
 images tied up in unresolved cross-class duplicate conflicts — regenerate
 it after any batch of human review decisions.
 
+## Model & dataloader infrastructure
+
+Implemented, not yet used for any actual training run.
+
+#### Dataset / transforms / dataloaders (`src/data/dataset.py`, `transforms.py`, `dataloaders.py`)
+
+- `RetinalDataset` (a `torch.utils.data.Dataset`) reads one manifest at a
+  time. Manifest choice is fixed by convention, never accidental:
+  - **training** may use either `train_original.csv` or
+    `train_balanced.csv` — **the default model-training pipeline uses
+    `train_balanced.csv`**.
+  - **validation always uses `val_original.csv`**, **test always uses
+    `test_original.csv`** — both loaded with `require_all_original=True`,
+    which raises `DatasetManifestError` if a single augmented row is ever
+    present, so a val/test manifest can never silently be swapped for a
+    training one.
+  - `validate_dataset_manifests()` runs the full one-call consistency
+    check across all three (per-manifest value validity, val/test
+    original-only enforcement, no cross-manifest path/ID overlap) and is
+    reusable by later tasks.
+- Every sample is a dict: `image` (tensor after `transform`), `label`
+  (int 0-9), `class_name`, `image_path` (the exact path opened —
+  resolved against `raw_dir` when `is_original=true`, against
+  `data/processed/train/` when `is_original=false`), `original_id`,
+  `parent_original_id`, `is_original` (bool). This is deliberately rich
+  enough that later evaluation code can write `results/raw_predictions/`
+  straight from a dataloader batch without touching this class again.
+- **Class index mapping is centralized** in `build_class_to_idx()` —
+  canonical class names sorted alphabetically, indices 0-9 assigned in
+  that order. This is the *only* place a class name becomes an integer;
+  every dataset, split, model, and future experiment must go through it
+  (or construct a `RetinalDataset`, which calls it internally) rather than
+  ever deriving an ordering from filesystem iteration order.
+- **Offline augmentation (Task 4) vs. runtime preprocessing (Task 5) are
+  distinct stages, never confused:** Task 4 ran once, ahead of time,
+  against `train_original.csv` only, physically baking flips/rotations/
+  brightness/contrast/affine/color-jitter into the files referenced by
+  `train_balanced.csv`. `src/data/transforms.py`'s `build_train_transform`
+  / `build_eval_transform` run every time any sample is loaded — resize
+  (shorter side to `image.resize_size`, default 256) → center-crop to
+  `image.size` (default 224) → tensor → ImageNet normalization — and are
+  **deterministic with no additional randomness**, for training and
+  eval/test alike. Validation/test never receive random augmentation of
+  any kind, at either stage.
+- `build_dataloader` / `build_train_dataloader` (shuffled, `drop_last=True`,
+  optional seeded `torch.Generator` for reproducible shuffle order) /
+  `build_eval_dataloader` (never shuffled, never drops a sample). Defaults
+  (`batch_size=16`, `num_workers=4`) match `configs/dataset.yaml:
+  dataloader` for the target RTX 3050 6GB; `pin_memory` auto-disables on a
+  CPU-only machine to avoid the usual warning/overhead.
+
+#### Baseline models (`src/models/base.py`, `factory.py`)
+
+All three required baselines — **ResNet50**, **EfficientNetB0**, and
+**MaxViT** (`maxvit_tiny_tf_224`) — are implemented as the *same* wrapper
+class, `TimmBackboneModel`, around `timm.create_model`, so their very
+different internal architectures never leak into training/evaluation code:
+
+```python
+logits = model(images)                          # [B, 10]
+output = model(images, return_features=True)    # ModelOutput(logits, features)
+```
+
+`features` is the pre-classifier pooled embedding (`[B, feature_dim]`),
+needed by later tasks (supervised contrastive learning, AA-EvidentNet
+fusion, Grad-CAM, uncertainty experiments) without any per-architecture
+special-casing. `feature_dim` is read from the instantiated model
+(`backbone.num_features`), never hard-coded:
+
+| Model | timm architecture | Parameters (total) | Feature dim |
+|---|---|---:|---:|
+| ResNet50 | `resnet50` | 23,528,522 | 2,048 |
+| EfficientNetB0 | `efficientnet_b0` | 4,020,358 | 1,280 |
+| MaxViT | `maxvit_tiny_tf_224` | 30,408,658 | 512 |
+
+(Parameter/feature counts above are generated, not hand-typed — see
+`results/tables/model_parameters.csv`, produced by `model_check` below.)
+`maxvit_tiny_tf_224` was chosen (and verified against the installed
+`timm==1.0.28`, not assumed) as the smallest MaxViT-TF variant with native
+224×224 ImageNet-1k pretrained weights, to fit the target RTX 3050 6GB —
+a hardware-driven default, not a scientifically tuned one.
+
+`create_model("resnet50" | "efficientnetb0" | "maxvit", config)`
+(`src/models/factory.py`) is the only way training/evaluation code should
+instantiate a baseline; an unknown name raises `ModelConfigError` with the
+list of registered names. All architecture parameters (backbone name,
+`pretrained`, `num_classes`, `dropout`) live in `configs/models.yaml:
+baselines.*`, never hard-coded in source.
+
+#### CPU smoke testing (`python run_pipeline.py model_check`)
+
+Instantiates each baseline, runs one synthetic forward pass, checks the
+output shape is `[B, 10]`, the feature shape is non-empty, and there are
+no NaN/Inf values — **never trains**. Runs in a few seconds on CPU with
+**`pretrained=False` by default** (fully offline; this is what the pytest
+suite also uses, so unit tests never need internet access or a weight
+download). Pass `--pretrained` to additionally verify real
+ImageNet-pretrained weights can be downloaded and instantiated for all
+three models — this **requires internet access** and is a manual/CI-optional
+check, never run by default `pytest`. Writes
+`results/tables/model_parameters.csv` from the actually-instantiated
+models (never hand-typed).
+
 ### Original images vs. augmented training samples vs. clinical observations
 
 **The balanced 20,000-sample training set does not represent 20,000
@@ -402,7 +509,7 @@ generalization discussion) must be made with respect to (3), not (2).
 configs/            YAML configuration (dataset, models, losses, training, evaluation, experiments)
 data/
   raw/               Original DS2 images, one subfolder per class (present, read-only)
-  processed/         Resized/cleaned images and split data (not yet generated)
+  processed/         train/<class>/ - generated (augmented) training images only; no val/test copies exist
   manifests/         File-level manifests + hashes describing exact dataset versions used
   audit/             Outputs of the dataset audit stage
 src/
@@ -428,6 +535,9 @@ Verified working environment for this repository:
 - Python 3.10.11
 - torch 2.10.0 (CPU-only build; no CUDA GPU was detected in this
   environment — see `REPRODUCIBILITY.md` for how to switch to a CUDA build)
+- torchvision 0.25.0 and timm 1.0.28 (pinned to match torch 2.10.0 —
+  installing torchvision unpinned will pull a newer torch; see
+  `REPRODUCIBILITY.md`)
 - numpy, pandas, pillow, PyYAML, scikit-learn (see `requirements.txt` for
   exact pinned versions)
 
@@ -452,13 +562,15 @@ All pipeline stages run through a single entry point:
 python run_pipeline.py <command> [options]
 ```
 
-Commands (recognized now; `audit` and `prepare_dataset` are implemented,
-the rest fail with a clear message rather than doing nothing):
+Commands (recognized now; `audit`, `prepare_dataset`, and `model_check`
+are implemented, the rest fail with a clear message rather than doing
+nothing):
 
 | Command            | Purpose                                             |
 |---------------------|------------------------------------------------------|
 | `audit`             | Dataset audit: counts, duplicates, corruption, leakage |
 | `prepare_dataset`   | Audit + eligibility + 70/20/10 original split + balanced (2,000/class) training set |
+| `model_check [--pretrained]` | Instantiate ResNet50/EfficientNetB0/MaxViT, run a synthetic forward pass, report shapes/params (never trains; offline unless `--pretrained`) |
 | `baseline --model maxvit` | Train/evaluate the baseline model             |
 | `train --model aa_evidentnet` | Train the proposed model                 |
 | `ablation`          | Ablation studies over proposed-model components     |

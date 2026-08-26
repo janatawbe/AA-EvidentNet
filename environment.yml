@@ -17,4 +17,8 @@ dependencies:
   - pip:
       # CPU-only build verified in the reference environment. Replace with
       # a CUDA-enabled build (see REPRODUCIBILITY.md) if a GPU is available.
+      # torchvision is pinned to the version matching torch==2.10.0 - do
+      # not let pip resolve it unpinned, it will upgrade torch.
       - torch==2.10.0
+      - torchvision==0.25.0
+      - timm==1.0.28
