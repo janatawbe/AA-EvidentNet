@@ -50,24 +50,55 @@ under `data/raw/`, as one subfolder per class:
 data/raw/<Class Name>/<image>.jpg
 ```
 
-Verified in this environment: 10 classes, 5,335 JPG images total, ~1.7 GB,
-with substantial class imbalance (from 17 images in the smallest class to
-1,509 in the largest). Class names currently present:
+Verified in this environment (re-checked 2026-08-26, read-only): 10 classes,
+5,335 JPG images total, ~1.7 GB, with substantial class imbalance (from 17
+images in the smallest class to 1,509 in the largest).
 
-- Central Serous Chorioretinopathy [Color Fundus]
-- Diabetic Retinopathy
-- Disc Edema
-- Glaucoma
-- Healthy
-- Macular Scar
-- Myopia
-- Pterygium
-- Retinal Detachment
-- Retinitis Pigmentosa
+The on-disk directory names under `data/raw/` are **not** modified to match
+the project's canonical class names (some carry extra annotations, e.g.
+`[Color Fundus]`). `configs/dataset.yaml: class_directory_mapping` is the
+single source of truth mapping each canonical class name to its exact,
+unmodified `data/raw/` subdirectory name — see that file rather than
+duplicating the mapping here. Canonical class names and raw image counts:
+
+| Canonical class name              | Raw directory name (data/raw/)                    | Images |
+|------------------------------------|-----------------------------------------------------|-------:|
+| Central Serous Chorioretinopathy   | `Central Serous Chorioretinopathy [Color Fundus]`   |    101 |
+| Diabetic Retinopathy                | `Diabetic Retinopathy`                              |  1,509 |
+| Disc Edema                          | `Disc Edema`                                        |    127 |
+| Glaucoma                             | `Glaucoma`                                          |  1,349 |
+| Healthy                              | `Healthy`                                           |  1,024 |
+| Macular Scar                         | `Macular Scar`                                      |    444 |
+| Myopia                               | `Myopia`                                            |    500 |
+| Pterygium                            | `Pterygium`                                         |     17 |
+| Retinal Detachment                   | `Retinal Detachment`                                |    125 |
+| Retinitis Pigmentosa                 | `Retinitis Pigmentosa`                              |    139 |
 
 No deduplication, quality filtering, or leakage checks have been performed
 yet — that is the job of the (not yet implemented) `audit` and
 `prepare_dataset` pipeline stages.
+
+### Original images vs. augmented training samples vs. clinical observations
+
+These three counts are distinct and must never be conflated in any report,
+figure, or discussion of results:
+
+1. **Original training images** — the real, unique photographs in a class's
+   training split (a subset of the raw counts in the table above, after the
+   70/20/10 split is applied). For Pterygium this is at most ~12 images.
+2. **Augmented training samples** — the count actually seen per epoch after
+   the training-only augmentation pipeline resamples/augments each class up
+   to `target_train_samples_per_class: 2000` (a fixed methodology choice,
+   not provisional — see `configs/dataset.yaml`). Augmentation is applied to
+   the training split only, never to validation or test data.
+3. **Independent clinical observations/patients** — the number of distinct
+   underlying patients/eyes, which is bounded above by (1) and is
+   **unaffected by augmentation**.
+
+Reaching 2,000 augmented training samples for a minority class does **not**
+mean 2,000 independent clinical observations exist for that class. Any
+statistical claim (confidence intervals, generalization discussion) must be
+made with respect to (3), not (2).
 
 ## Repository structure
 

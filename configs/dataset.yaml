@@ -1,9 +1,14 @@
 # Dataset configuration for the DS2 retinal disease dataset.
 #
-# NOTE: `target_train_samples_per_class` and split ratios are PROVISIONAL
-# defaults, not scientifically tuned values. They must be revisited once the
-# data audit (experiments/00_data_audit) quantifies per-class counts,
-# duplicates, and quality issues.
+# Split ratios (70/20/10) and target_train_samples_per_class (2000) are
+# FIXED research methodology decisions, not provisional placeholders — do
+# not change them without an explicit methodology decision. See the
+# "Training sample count methodology" note below for what the 2000 figure
+# does and does not mean.
+#
+# image.normalize_mean/std below ARE still provisional (ImageNet defaults)
+# and should be revisited once the data audit computes real dataset
+# statistics.
 
 seed: 42
 
@@ -13,9 +18,13 @@ paths:
   manifests_dir: data/manifests
   audit_dir: data/audit
 
-# Class names must exactly match the subfolder names under data/raw/.
+# Canonical class names used everywhere in code, configs, results, and the
+# paper. These do NOT necessarily match the on-disk directory names under
+# data/raw/ (some of which carry extra annotations, e.g. "[Color Fundus]").
+# Never rename or modify the actual data/raw/ directories to match these —
+# use `class_directory_mapping` below instead.
 class_names:
-  - "Central Serous Chorioretinopathy [Color Fundus]"
+  - "Central Serous Chorioretinopathy"
   - "Diabetic Retinopathy"
   - "Disc Edema"
   - "Glaucoma"
@@ -26,26 +35,75 @@ class_names:
   - "Retinal Detachment"
   - "Retinitis Pigmentosa"
 
+# Exact mapping from canonical class name -> actual subdirectory name under
+# data/raw/. This is an explicit, exhaustive lookup table, not a substring
+# or fuzzy match, so that a directory rename/typo fails loudly (missing key)
+# instead of silently matching the wrong class or no class. Verified against
+# the real data/raw/ contents on 2026-08-26 (see data/audit/ once the audit
+# stage is implemented for the authoritative, regenerated record).
+class_directory_mapping:
+  "Central Serous Chorioretinopathy": "Central Serous Chorioretinopathy [Color Fundus]"
+  "Diabetic Retinopathy": "Diabetic Retinopathy"
+  "Disc Edema": "Disc Edema"
+  "Glaucoma": "Glaucoma"
+  "Healthy": "Healthy"
+  "Macular Scar": "Macular Scar"
+  "Myopia": "Myopia"
+  "Pterygium": "Pterygium"
+  "Retinal Detachment": "Retinal Detachment"
+  "Retinitis Pigmentosa": "Retinitis Pigmentosa"
+
 num_classes: 10
 
 image:
   size: 224
   channels: 3
-  # Provisional; not yet computed from the actual dataset.
+  # PROVISIONAL; not yet computed from the actual dataset. Revisit once the
+  # data audit runs.
   normalize_mean: [0.485, 0.456, 0.406]
   normalize_std: [0.229, 0.224, 0.225]
 
 split:
-  # PROVISIONAL. Stratification strategy and exact ratios must be finalized
-  # after the data audit (class imbalance ranges from 17 to 1509 images).
+  # FIXED research specification: 70% train / 20% validation / 10% test.
+  # Not provisional — do not change without an explicit methodology
+  # decision. Stratification is applied per-class given severe imbalance
+  # (17 to 1509 original images per class).
   train_fraction: 0.70
-  val_fraction: 0.15
-  test_fraction: 0.15
+  val_fraction: 0.20
+  test_fraction: 0.10
   stratified: true
 
-# Target number of training samples per class after any balancing strategy
-# (oversampling / augmentation / undersampling) is applied. PROVISIONAL —
-# the real dataset's smallest class (Pterygium, 17 images) is far below this.
+# ---------------------------------------------------------------------------
+# Training sample count methodology (FIXED — do not change this target)
+# ---------------------------------------------------------------------------
+# target_train_samples_per_class is the number of TRAINING SAMPLES PER CLASS
+# fed to the model after the training-only augmentation pipeline (not yet
+# implemented) balances classes. It is a fixed methodology choice, not a
+# provisional default to be tuned away.
+#
+# This number conflates three distinct things that must be kept separate in
+# all reporting, code comments, and the paper:
+#
+#   1. Original training images: the real, unique photographs in a class's
+#      training split, taken directly from data/raw (post 70/20/10 split).
+#      For the smallest class (Pterygium, 17 images total before splitting)
+#      this may be well under 100 original training images.
+#   2. Augmented training samples: the count actually seen by the model
+#      during an epoch after augmentation (crops, flips, color jitter,
+#      etc.) is applied to reach target_train_samples_per_class == 2000.
+#      Augmentation is applied to the TRAINING split only — never to
+#      validation or test data.
+#   3. Independent clinical observations/patients: the number of distinct
+#      patients/eyes underlying the original images. This is <= the number
+#      of original training images and is NOT increased by augmentation.
+#
+# Reaching 2000 augmented training samples in a minority class does NOT mean
+# there are 2000 independent clinical observations for that class — for
+# Pterygium it means at most a few dozen underlying images (and likely fewer
+# unique patients) are being resampled/augmented into 2000 samples. Anything
+# downstream (statistics, discussion of generalization, confidence
+# intervals) must be computed with respect to the count of independent
+# clinical observations, not the augmented sample count.
 target_train_samples_per_class: 2000
 
 dataloader:
