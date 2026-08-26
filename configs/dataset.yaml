@@ -113,6 +113,35 @@ dataloader:
   shuffle_train: true
 
 # ---------------------------------------------------------------------------
+# Duplicate eligibility policy (src/data/eligibility.py).
+#
+# This is a data-QUALITY decision, not a class-balancing strategy: it only
+# determines which raw images are even eligible to be considered later, not
+# how many samples end up in the (not yet implemented) split.
+# ---------------------------------------------------------------------------
+duplicate_policy:
+  # A cross-class exact-duplicate group with no human resolution (still
+  # UNRESOLVED in data/audit/cross_class_duplicate_review.csv) is excluded
+  # from dataset preparation entirely. This is the only scientifically
+  # supportable default — do not change to "keep" to make more data
+  # available; that would mean training on images with contradictory,
+  # unadjudicated labels.
+  unresolved_cross_class: exclude   # exclude | keep
+
+  # A same-class exact duplicate has no label conflict, so it stays
+  # eligible by default. (The future split stage must still keep every
+  # member of such a group in the same split — see
+  # eligibility.assert_split_is_valid.)
+  same_class_exact_duplicate: keep  # keep | exclude
+
+  # If true, the future dataset-splitting stage must refuse to run at all
+  # while ANY cross-class duplicate group is still UNRESOLVED, even though
+  # such groups are already excluded from eligibility above. This forces
+  # full human review to actually happen rather than letting "exclude by
+  # default" quietly stand in for it forever.
+  require_review_before_split: true
+
+# ---------------------------------------------------------------------------
 # Raw dataset audit configuration (src/data/audit_dataset.py and friends).
 # The audit is strictly READ-ONLY with respect to data/raw/ — it never
 # renames, moves, deletes, resizes, or otherwise modifies raw files.

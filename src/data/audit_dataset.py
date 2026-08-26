@@ -22,6 +22,7 @@ from src.data import dataset_statistics as stats
 from src.data import detect_augmented_families as aug
 from src.data import detect_duplicates as dup
 from src.data import duplicate_review as review
+from src.data import eligibility as elig
 from src.data.records import INVENTORY_COLUMNS, ImageRecord, write_csv
 from src.utils.config import load_config
 from src.utils.hashing import hash_file
@@ -407,6 +408,7 @@ class AuditSummary:
     config_class_names: List[str] = field(default_factory=list)
     cross_class_review_rows: List[Dict[str, Any]] = field(default_factory=list)
     review_csv_path: Optional[Path] = None
+    eligible_class_distribution: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -443,6 +445,22 @@ class AuditSummary:
         for cls, count in self.dataset_stats["count_by_class"].items():
             pct = self.dataset_stats["percentage_by_class"].get(cls, 0.0)
             lines.append(f"  {cls}: {count} ({pct}%)")
+
+        if self.eligible_class_distribution:
+            total_eligible = sum(r["eligible_count"] for r in self.eligible_class_distribution)
+            total_raw = sum(r["raw_count"] for r in self.eligible_class_distribution)
+            lines.append("")
+            lines.append(
+                f"Eligible dataset (post-duplicate-review): {total_eligible}/{total_raw} eligible "
+                f"({total_raw - total_eligible} excluded)"
+            )
+            lines.append("Per-class eligible counts:")
+            for row in self.eligible_class_distribution:
+                lines.append(
+                    f"  {row['canonical_class']}: eligible={row['eligible_count']} "
+                    f"excluded={row['excluded_count']} raw={row['raw_count']} "
+                    f"({row['eligible_percentage']}% eligible)"
+                )
 
         lines.append("")
         lines.append(f"Reports written to: {self.audit_dir}")
@@ -481,6 +499,9 @@ def run_dataset_audit(
             resolution/class values, duplicate or unknown groups). Raised
             before that file is overwritten, to protect human review work
             already recorded in it.
+        eligibility.EligibilityValidationError: the derived eligibility
+            manifest is internally inconsistent (should not happen in
+            practice; guards against a bug in this function).
         AuditFailedError: the audit ran and wrote all reports, but one or
             more issue types breached their configured "fail" policy
             (including any still-UNRESOLVED cross-class duplicate group).
@@ -548,6 +569,33 @@ def run_dataset_audit(
         audit_dir / "cross_class_duplicate_summary.csv",
     )
 
+    # --- Eligibility layer: derive which raw images may proceed to future
+    # splitting, purely from the duplicate groups + the review manifest's
+    # current resolution state. Never hard-codes exclusions, never assigns
+    # a label, never touches data/raw/.
+    duplicate_policy = {
+        **elig.DEFAULT_DUPLICATE_POLICY,
+        **(config.get("duplicate_policy", {}) or {}),
+    }
+    eligibility_rows = elig.build_eligibility_rows(
+        records, duplicate_groups, merged_review_rows, duplicate_policy
+    )
+    elig.assert_valid_eligibility_rows(
+        eligibility_rows,
+        class_directory_mapping.keys(),
+        expected_paths={r.path for r in records},
+    )
+    elig.write_eligibility_csv(eligibility_rows, audit_dir / "dataset_eligibility.csv")
+    eligible_class_distribution = elig.build_eligible_class_distribution_rows(
+        eligibility_rows, class_directory_mapping.keys()
+    )
+    elig.write_eligible_class_distribution_csv(
+        eligibility_rows, class_directory_mapping.keys(), audit_dir / "eligible_class_distribution.csv"
+    )
+    elig.write_eligibility_summary_csv(
+        eligibility_rows, same_class_groups, merged_review_rows, audit_dir / "eligibility_summary.csv"
+    )
+
     leakage_rows, issue_counts, failing_issue_types = _build_leakage_report(
         directory_validation, records, duplicate_groups, augmentation_findings, policies,
         cross_class_review_rows=merged_review_rows,
@@ -567,6 +615,7 @@ def run_dataset_audit(
         config_class_names=sorted(class_directory_mapping.keys()),
         cross_class_review_rows=merged_review_rows,
         review_csv_path=review_csv_path,
+        eligible_class_distribution=eligible_class_distribution,
     )
 
     print(summary.format_report())
