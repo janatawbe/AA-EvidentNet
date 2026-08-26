@@ -74,10 +74,11 @@ duplicating the mapping here. Canonical class names and raw image counts:
 | Retinal Detachment                   | `Retinal Detachment`                                |    125 |
 | Retinitis Pigmentosa                 | `Retinitis Pigmentosa`                              |    139 |
 
-The raw-data audit (`python run_pipeline.py audit`) and the deterministic
-original-image split (`python run_pipeline.py prepare_dataset`) are both
-implemented; balancing to `target_train_samples_per_class` and augmentation
-are not yet implemented.
+The full dataset-preparation pipeline is implemented end to end:
+`python run_pipeline.py prepare_dataset` runs the raw-data audit, the
+deterministic original-image 70/20/10 split, and the balanced (2,000/class)
+training-set generation, in that order. Model training is not yet
+implemented.
 
 ### Known data-quality issue: cross-class exact duplicates (requires human review)
 
@@ -138,7 +139,7 @@ must never be split across train/val/test. `src/data/eligibility.py`
 exposes `assert_split_is_valid()` for that future stage to call; it never
 assigns a resolution or a split itself — it only refuses invalid input.
 
-#### Pipeline stages: raw dataset -> audit -> eligibility review -> eligible dataset -> original split -> future augmentation
+#### Pipeline stages: raw dataset -> audit -> eligibility review -> eligible dataset -> original split -> balanced training set
 
 ```text
 raw dataset (data/raw/, immutable — never renamed, moved, or modified)
@@ -157,7 +158,11 @@ ELIGIBLE DATASET (src/data/eligibility.py: data/audit/dataset_eligibility.csv)
 ORIGINAL 70/20/10 SPLIT (src/data/build_split.py: data/manifests/{train,val,test}_original.csv)
     |
     v
-future augmentation / balancing to target_train_samples_per_class (NOT YET IMPLEMENTED)
+BALANCED TRAINING SET, train split only (src/data/generate_balanced_dataset.py:
+    data/manifests/train_balanced.csv + data/processed/train/) -- val/test untouched
+    |
+    v
+future model training (NOT YET IMPLEMENTED)
 ```
 
 `data/raw/` is always the permanent source archive — nothing is ever
@@ -288,27 +293,108 @@ augmented record exists yet. `original_id` is
 across machines/runs, and independent of any absolute path (see
 `compute_original_id` in `src/data/build_split.py`).
 
+#### Balanced training set (2,000 samples/class)
+
+`python run_pipeline.py prepare_dataset` (`src/data/generate_balanced_dataset.py`)
+expands `train_original.csv` up to exactly 2,000 samples per class via
+augmentation, writing `data/manifests/train_balanced.csv`. **Validation and
+test are never touched by this stage** — they remain original images only,
+forever. Key rules, all enforced by explicit checks, not just convention:
+
+- Only rows from `train_original.csv` may ever be augmentation parents; an
+  explicit check (`assert_no_val_test_contamination`) fails loudly if a
+  validation/test path or ID is ever detected in that role.
+- A parent must itself be an original image — an already-generated sample
+  can never become a parent (no recursive augmentation).
+- Generated files are written only under `data/processed/train/<class>/`,
+  never under `data/raw/`, `data/processed/val/`, or `data/processed/test/`
+  (which are never created).
+- Every one of the class's original training images is kept — the balanced
+  set only ever *adds* generated rows, never drops or replaces originals.
+- In `train_balanced.csv`, a row's `path` is relative to `raw_dir` when
+  `is_original=true` (exactly as in `train_original.csv`) and relative to
+  `data/processed/train/` when `is_original=false` — the `is_original`
+  column itself tells a reader which base directory to prepend.
+- `augmentation_type` records the actual transform applied — one of
+  `horizontal_flip`, `rotation`, `brightness_contrast`, `affine`,
+  `color_jitter`, or `combined` (never a vague label like "augmented") —
+  assigned round-robin across a class's active recipes together with
+  round-robin parent selection, so generation is spread evenly rather than
+  exhausting one parent or one recipe first.
+- Generated IDs are deterministic:
+  `sha256(parent_original_id|canonical_class|augmentation_index|seed|augmentation_config_hash)`;
+  each generated sample also gets its own seeded RNG from that same tuple,
+  so the entire generation is independent of processing order and
+  byte-identical given the same original manifest, seed, and config.
+- 14 mandatory checks run before any manifest is trusted
+  (`validate_balanced_manifest`): exact row/per-class counts, no
+  validation/test images, every generated row has a valid original-training
+  parent (never a recursive one), generated class matches its parent,
+  split is always `train`, every original is retained, no duplicate IDs,
+  `is_original` is consistent with `augmentation_type`, and every generated
+  file exists, is readable, and matches its expected dimensions.
+
+**Verified on the real dataset** (seed 42): all 10 classes hit exactly
+2,000/2,000, for a total of exactly **20,000** balanced training samples —
+3,075 original + 16,925 generated. All 14 integrity checks PASS.
+Independently re-verified outside the module's own checks: zero validation/test
+paths or IDs were ever used as a parent or appear anywhere in
+`train_balanced.csv`; zero generated rows have a generated (rather than
+original) parent; zero generated files exist under `data/raw/`; every
+generated file exists exactly where expected under `data/processed/train/`.
+
+| Canonical class | Original | Generated | Total | Expansion |
+|---|---:|---:|---:|---:|
+| Central Serous Chorioretinopathy | 56 | 1,944 | 2,000 | 35.7x |
+| Diabetic Retinopathy | 1,015 | 985 | 2,000 | 2.0x |
+| Disc Edema | 77 | 1,923 | 2,000 | 26.0x |
+| Glaucoma | 694 | 1,306 | 2,000 | 2.9x |
+| Healthy | 576 | 1,424 | 2,000 | 3.5x |
+| Macular Scar | 246 | 1,754 | 2,000 | 8.1x |
+| Myopia | 225 | 1,775 | 2,000 | 8.9x |
+| Pterygium | 12 | 1,988 | 2,000 | 166.7x |
+| Retinal Detachment | 85 | 1,915 | 2,000 | 23.5x |
+| Retinitis Pigmentosa | 89 | 1,911 | 2,000 | 22.5x |
+
+Full per-class/per-augmentation-type breakdown (parent reuse counts, mean
+and max samples generated per parent) is in
+`data/audit/augmentation_statistics.csv`; provenance (seed, config hash,
+source manifest hash, git commit) is in
+`data/audit/balanced_dataset_metadata.json`.
+
+**This split is provisional in the same sense as the original split above**:
+it is built from `train_original.csv`, which currently excludes the 942
+images tied up in unresolved cross-class duplicate conflicts — regenerate
+it after any batch of human review decisions.
+
 ### Original images vs. augmented training samples vs. clinical observations
 
-These three counts are distinct and must never be conflated in any report,
-figure, or discussion of results:
+**The balanced 20,000-sample training set does not represent 20,000
+independent clinical observations.** These three counts are distinct and
+must never be conflated in any report, figure, or discussion of results:
 
 1. **Original training images** — the real, unique photographs in a class's
    training split (a subset of the raw counts in the table above, after the
-   70/20/10 split is applied). For Pterygium this is at most ~12 images.
-2. **Augmented training samples** — the count actually seen per epoch after
-   the training-only augmentation pipeline resamples/augments each class up
-   to `target_train_samples_per_class: 2000` (a fixed methodology choice,
-   not provisional — see `configs/dataset.yaml`). Augmentation is applied to
-   the training split only, never to validation or test data.
+   70/20/10 split is applied). For Pterygium this is only 12 images.
+2. **Augmented training samples** — the count actually seen per epoch: each
+   class is expanded to exactly 2,000 training samples
+   (`target_train_samples_per_class`, a fixed methodology choice, not
+   provisional) by augmenting its original training images. Augmentation is
+   applied to the training split only, never to validation or test data,
+   which contain original images only and are never balanced or augmented.
+   Every generated sample retains `parent_original_id`, so the full
+   augmentation lineage back to a specific original training image is
+   always auditable from `train_balanced.csv` alone.
 3. **Independent clinical observations/patients** — the number of distinct
    underlying patients/eyes, which is bounded above by (1) and is
    **unaffected by augmentation**.
 
 Reaching 2,000 augmented training samples for a minority class does **not**
-mean 2,000 independent clinical observations exist for that class. Any
-statistical claim (confidence intervals, generalization discussion) must be
-made with respect to (3), not (2).
+mean 2,000 independent clinical observations exist for that class — for
+Pterygium, 2,000 training samples come from only 12 original photographs
+(a 166.7x expansion). Augmented samples must never be presented as
+additional patients. Any statistical claim (confidence intervals,
+generalization discussion) must be made with respect to (3), not (2).
 
 ## Repository structure
 
@@ -372,7 +458,7 @@ the rest fail with a clear message rather than doing nothing):
 | Command            | Purpose                                             |
 |---------------------|------------------------------------------------------|
 | `audit`             | Dataset audit: counts, duplicates, corruption, leakage |
-| `prepare_dataset`   | Build the deterministic 70/20/10 original-image split from the eligible dataset |
+| `prepare_dataset`   | Audit + eligibility + 70/20/10 original split + balanced (2,000/class) training set |
 | `baseline --model maxvit` | Train/evaluate the baseline model             |
 | `train --model aa_evidentnet` | Train the proposed model                 |
 | `ablation`          | Ablation studies over proposed-model components     |

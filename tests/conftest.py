@@ -32,6 +32,20 @@ def make_invalid_image(path, content=b"this is not a real jpeg file"):
     path.write_bytes(content)
 
 
+DEFAULT_TEST_AUGMENTATION_CONFIG = {
+    "enabled": True,
+    # Deliberately tiny (vs. the real 2000) so tests exercise the full
+    # audit -> split -> balance pipeline in milliseconds, not minutes.
+    "target_samples_per_class": 10,
+    "horizontal_flip": {"enabled": True, "probability": 0.5},
+    "rotation": {"enabled": True, "degrees": 10},
+    "brightness": {"enabled": True, "factor": 0.15},
+    "contrast": {"enabled": True, "factor": 0.15},
+    "affine": {"enabled": True, "translate": 0.05, "scale": {"min": 0.95, "max": 1.05}},
+    "color_jitter": {"enabled": True, "factor": 0.10},
+}
+
+
 def write_min_dataset_config(
     tmp_path,
     class_directory_mapping,
@@ -40,9 +54,16 @@ def write_min_dataset_config(
     policies=None,
     keywords=None,
     supported_extensions=None,
+    augmentation=None,
     config_name="dataset.yaml",
 ):
-    """Write a minimal but schema-valid dataset.yaml for run_dataset_audit()."""
+    """Write a minimal but schema-valid dataset.yaml for run_dataset_audit().
+
+    `augmentation` overrides src/data/generate_balanced_dataset.py's config
+    (defaults to DEFAULT_TEST_AUGMENTATION_CONFIG, a tiny target for fast
+    tests) - pass an explicit dict (e.g. {"target_samples_per_class": 2000})
+    to test closer to real settings.
+    """
     config = {
         "seed": 42,
         "paths": {
@@ -61,6 +82,7 @@ def write_min_dataset_config(
             "stratified": True,
         },
         "target_train_samples_per_class": 2000,
+        "augmentation": {**DEFAULT_TEST_AUGMENTATION_CONFIG, **(augmentation or {})},
         "audit": {
             "supported_extensions": supported_extensions or [".jpg", ".jpeg"],
             "policies": policies or {},

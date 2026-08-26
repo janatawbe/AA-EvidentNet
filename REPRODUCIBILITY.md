@@ -70,7 +70,7 @@ bytes; `hash_string` hashes an arbitrary string (used for
 `(relative_path, file_hash)` pairs (order-independent) into one digest
 representing an entire dataset manifest.
 
-`prepare_dataset` (`src/data/build_split.py`) now produces exactly this
+`prepare_dataset` (`src/data/build_split.py`) produces exactly this
 provenance for the original 70/20/10 split: `data/audit/{train,val,test}_manifest_hash.txt`
 each hold the SHA-256 of their manifest file, and `data/audit/split_metadata.json`
 records the seed, split ratios, `dataset_eligibility.csv`'s hash, the
@@ -80,6 +80,20 @@ config, and code commit that produced it. The same eligibility manifest +
 config + seed always reproduces byte-identical `*_original.csv` files; a
 different seed may produce a different (still valid, still leakage-free)
 allocation.
+
+The same `prepare_dataset` run then produces the balanced training set
+(`src/data/generate_balanced_dataset.py`): `data/audit/train_balanced_manifest_hash.txt`
+holds `train_balanced.csv`'s SHA-256, and `data/audit/balanced_dataset_metadata.json`
+records the seed, target samples/class, `train_original.csv`'s hash, the
+config hash (including a dedicated hash of just the augmentation
+sub-config), git commit, and environment info. Every generated sample's ID
+and its augmentation parameters are derived deterministically from
+`(parent_original_id, canonical_class, augmentation_index, seed,
+augmentation_config_hash)` — see `compute_generated_id` and `_sample_rng`
+in `src/data/generate_balanced_dataset.py` — so generation is independent
+of processing order and the same inputs always reproduce byte-identical
+generated images and manifest. A different seed may produce different
+(still valid) augmented images.
 
 ## Git provenance
 
@@ -93,13 +107,11 @@ until that code is committed.
 
 ## What is NOT yet guaranteed
 
-- The original train/val/test split (`prepare_dataset`) is reproducible
-  and leakage-checked, but it is built on an eligibility state where 464
-  cross-class duplicate groups remain UNRESOLVED (see README.md) — it will
-  change as those get human-reviewed, so treat it as provisional, not final.
-- Balancing to `target_train_samples_per_class` and augmentation are not
-  yet implemented, so there is no reproducibility guarantee for those
-  stages yet.
+- The original train/val/test split AND the balanced training set
+  (`prepare_dataset`) are both reproducible and leakage-checked, but both
+  are built on an eligibility state where 464 cross-class duplicate groups
+  remain UNRESOLVED (see README.md) — both will change as those get
+  human-reviewed, so treat them as provisional, not final.
 - No model or training loop exists yet, so weight initialization and
   training dynamics reproducibility is not yet applicable.
 - CPU-only determinism has been configured defensively but not empirically

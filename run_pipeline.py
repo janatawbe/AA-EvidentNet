@@ -33,6 +33,11 @@ from src.data.build_split import (  # noqa: E402
 )
 from src.data.duplicate_review import ReviewValidationError  # noqa: E402
 from src.data.eligibility import EligibilityValidationError  # noqa: E402
+from src.data.generate_balanced_dataset import (  # noqa: E402
+    BalancedDatasetBuildError,
+    BalancedDatasetValidationError,
+    run_generate_balanced_dataset,
+)
 
 
 class PipelineNotImplementedError(NotImplementedError):
@@ -154,7 +159,28 @@ def run_audit(args: argparse.Namespace) -> None:
 
 
 def run_prepare_dataset(args: argparse.Namespace) -> None:
+    """Full dataset-preparation pipeline: audit -> eligibility -> original
+    70/20/10 split -> split validation -> balanced (2000/class) training
+    set -> balanced manifest validation -> augmentation statistics ->
+    hashes/provenance.
+
+    A policy-driven AuditFailedError (e.g. the ever-present unresolved
+    cross-class duplicate groups) is reported but does not abort this
+    pipeline: the eligibility layer that the split/balance stages consume
+    already excludes those images, which is the actual leakage-prevention
+    mechanism. An AuditConfigError (a genuinely broken config/raw_dir) is
+    NOT caught here and still aborts everything, as it should.
+    """
+    try:
+        run_dataset_audit(config_path=args.config)
+    except AuditFailedError as e:
+        print(
+            f"[run_pipeline] audit reported policy-'fail' issues (continuing - the "
+            f"eligibility layer already excludes them from the split/balance below): {e}",
+            file=sys.stderr,
+        )
     run_build_split(config_path=args.config, seed=args.seed)
+    run_generate_balanced_dataset(config_path=args.config, seed=args.seed)
 
 
 def dispatch(args: argparse.Namespace) -> None:
@@ -201,6 +227,12 @@ def main(argv=None) -> int:
         return 1
     except SplitValidationError as e:
         print(f"[run_pipeline] SPLIT VALIDATION FAILED: {e}", file=sys.stderr)
+        return 1
+    except BalancedDatasetBuildError as e:
+        print(f"[run_pipeline] BALANCED DATASET BUILD ERROR: {e}", file=sys.stderr)
+        return 1
+    except BalancedDatasetValidationError as e:
+        print(f"[run_pipeline] BALANCED DATASET VALIDATION FAILED: {e}", file=sys.stderr)
         return 1
 
     return 0

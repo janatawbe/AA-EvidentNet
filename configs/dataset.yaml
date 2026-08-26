@@ -106,6 +106,55 @@ split:
 # clinical observations, not the augmented sample count.
 target_train_samples_per_class: 2000
 
+# ---------------------------------------------------------------------------
+# Training-only augmentation (src/data/generate_balanced_dataset.py).
+#
+# Applied ONLY to expand data/manifests/train_original.csv up to
+# target_train_samples_per_class per class. NEVER applied to validation or
+# test data, which remain original images only. Ranges below are
+# conservative, ophthalmically-motivated choices (real fundus photos are
+# never flipped vertically, never rotated far off-axis, and never pushed to
+# an unrealistic brightness/contrast/color extreme, since that could
+# obscure or fabricate disease-relevant features) — they are provisional
+# defaults chosen for plausibility, not tuned for any downstream metric.
+augmentation:
+  enabled: true
+  target_samples_per_class: 2000
+
+  # Horizontal mirroring is anatomically valid for fundus images (left/right
+  # eye symmetry) and is the cheapest, safest augmentation available.
+  horizontal_flip:
+    enabled: true
+    probability: 0.5
+
+  # Small rotations only — fundus cameras are near-axis-aligned in practice;
+  # large rotations are not representative of real acquisitions.
+  rotation:
+    enabled: true
+    degrees: 10
+
+  # Mild brightness/contrast perturbation to be robust to real acquisition
+  # variation, without over/under-exposing the image enough to hide lesions.
+  brightness:
+    enabled: true
+    factor: 0.15
+  contrast:
+    enabled: true
+    factor: 0.15
+
+  # Small translate/scale only - large affine warps would distort anatomy.
+  affine:
+    enabled: true
+    translate: 0.05
+    scale:
+      min: 0.95
+      max: 1.05
+
+  # Mild color/saturation perturbation for camera/illuminant variation.
+  color_jitter:
+    enabled: true
+    factor: 0.10
+
 dataloader:
   batch_size: 16
   num_workers: 4

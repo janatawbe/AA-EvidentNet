@@ -192,11 +192,32 @@ def test_main_prepare_dataset_command_builds_split_after_audit(tmp_path):
     assert (audit_dir / "split_metadata.json").exists()
 
 
-def test_main_prepare_dataset_command_fails_clearly_without_audit_first(tmp_path, capsys):
+def test_main_prepare_dataset_command_runs_audit_internally(tmp_path):
+    # prepare_dataset now runs the audit stage itself (see run_prepare_dataset
+    # in run_pipeline.py) - it must succeed even without a prior standalone
+    # `audit` invocation, producing the eligibility manifest along the way.
     raw_dir = tmp_path / "raw"
     audit_dir = tmp_path / "audit"
-    make_image(raw_dir / "Alpha" / "a1.jpg")
-    make_image(raw_dir / "Beta" / "b1.jpg")
+    manifests_dir = tmp_path / "manifests"
+    for i in range(10):
+        make_image(raw_dir / "Alpha" / f"a{i}.jpg")
+    for i in range(10):
+        make_image(raw_dir / "Beta" / f"b{i}.jpg")
+    config_path = write_min_dataset_config(
+        tmp_path, {"Alpha": "Alpha", "Beta": "Beta"}, raw_dir, audit_dir
+    )
+
+    exit_code = run_pipeline.main(["prepare_dataset", "--config", str(config_path)])
+
+    assert exit_code == 0
+    assert (audit_dir / "dataset_eligibility.csv").exists()
+    assert (manifests_dir / "train_original.csv").exists()
+    assert (manifests_dir / "train_balanced.csv").exists()
+
+
+def test_main_prepare_dataset_command_fails_clearly_for_fatal_config_error(tmp_path, capsys):
+    raw_dir = tmp_path / "does_not_exist"
+    audit_dir = tmp_path / "audit"
     config_path = write_min_dataset_config(
         tmp_path, {"Alpha": "Alpha", "Beta": "Beta"}, raw_dir, audit_dir
     )
@@ -205,4 +226,4 @@ def test_main_prepare_dataset_command_fails_clearly_without_audit_first(tmp_path
 
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert "SPLIT BUILD ERROR" in captured.err
+    assert "AUDIT CONFIG ERROR" in captured.err
