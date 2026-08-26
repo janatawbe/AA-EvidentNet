@@ -18,8 +18,9 @@ sys.path.insert(0, str(REPO_ROOT))
 import run_pipeline  # noqa: E402
 from tests.conftest import make_image, make_invalid_image, write_min_dataset_config  # noqa: E402
 
-# "audit" is implemented (see test_main_audit_command_* below); every other
-# command is still recognized by the parser but not yet implemented.
+# "audit" and "prepare_dataset" are implemented (see test_main_audit_command_*
+# and test_main_prepare_dataset_command_* below); every other command is
+# still recognized by the parser but not yet implemented.
 ALL_COMMANDS = [
     "audit",
     "prepare_dataset",
@@ -34,7 +35,8 @@ ALL_COMMANDS = [
     "final_test",
 ]
 
-UNIMPLEMENTED_COMMANDS = [c for c in ALL_COMMANDS if c != "audit"]
+IMPLEMENTED_COMMANDS = {"audit", "prepare_dataset"}
+UNIMPLEMENTED_COMMANDS = [c for c in ALL_COMMANDS if c not in IMPLEMENTED_COMMANDS]
 
 MODEL_COMMANDS = ["baseline", "train"]
 
@@ -158,3 +160,49 @@ def test_main_audit_command_fails_clearly_on_policy_violation(tmp_path, capsys):
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "AUDIT FAILED" in captured.err
+
+
+# --- "prepare_dataset" is implemented: exercise it end-to-end against a tiny
+# fixture dataset (never the real data/raw/) via an explicit --config
+# override, always after first running "audit" to produce the eligibility
+# manifest it depends on. ---
+
+
+def test_main_prepare_dataset_command_builds_split_after_audit(tmp_path):
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    manifests_dir = tmp_path / "manifests"
+    for i in range(10):
+        make_image(raw_dir / "Alpha" / f"a{i}.jpg")
+    for i in range(10):
+        make_image(raw_dir / "Beta" / f"b{i}.jpg")
+    config_path = write_min_dataset_config(
+        tmp_path, {"Alpha": "Alpha", "Beta": "Beta"}, raw_dir, audit_dir
+    )
+
+    assert run_pipeline.main(["audit", "--config", str(config_path)]) == 0
+
+    exit_code = run_pipeline.main(["prepare_dataset", "--config", str(config_path)])
+
+    assert exit_code == 0
+    assert (manifests_dir / "train_original.csv").exists()
+    assert (manifests_dir / "val_original.csv").exists()
+    assert (manifests_dir / "test_original.csv").exists()
+    assert (audit_dir / "split_leakage_report.csv").exists()
+    assert (audit_dir / "split_metadata.json").exists()
+
+
+def test_main_prepare_dataset_command_fails_clearly_without_audit_first(tmp_path, capsys):
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    make_image(raw_dir / "Alpha" / "a1.jpg")
+    make_image(raw_dir / "Beta" / "b1.jpg")
+    config_path = write_min_dataset_config(
+        tmp_path, {"Alpha": "Alpha", "Beta": "Beta"}, raw_dir, audit_dir
+    )
+
+    exit_code = run_pipeline.main(["prepare_dataset", "--config", str(config_path)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "SPLIT BUILD ERROR" in captured.err

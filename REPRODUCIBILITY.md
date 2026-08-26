@@ -65,12 +65,21 @@ runs can be checked for having used identical settings.
 ## Dataset and manifest hashing
 
 `src/utils/hashing.hash_file` computes a SHA-256 digest of a single file's
-bytes. `hash_manifest` combines a list of `(relative_path, file_hash)` pairs
-(order-independent) into one digest representing an entire dataset
-manifest. Once `prepare_dataset` is implemented, every processed split
-should be accompanied by a manifest and its hash under `data/manifests/`,
-so it is always possible to verify that a given result used a specific,
-unchanged set of files and labels.
+bytes; `hash_string` hashes an arbitrary string (used for
+`build_split.compute_original_id`). `hash_manifest` combines a list of
+`(relative_path, file_hash)` pairs (order-independent) into one digest
+representing an entire dataset manifest.
+
+`prepare_dataset` (`src/data/build_split.py`) now produces exactly this
+provenance for the original 70/20/10 split: `data/audit/{train,val,test}_manifest_hash.txt`
+each hold the SHA-256 of their manifest file, and `data/audit/split_metadata.json`
+records the seed, split ratios, `dataset_eligibility.csv`'s hash, the
+config hash, git commit, full environment info, and per-manifest hashes
+together — so any split can be traced back to the exact eligibility state,
+config, and code commit that produced it. The same eligibility manifest +
+config + seed always reproduces byte-identical `*_original.csv` files; a
+different seed may produce a different (still valid, still leakage-free)
+allocation.
 
 ## Git provenance
 
@@ -84,9 +93,13 @@ until that code is committed.
 
 ## What is NOT yet guaranteed
 
-- No dataset splitting/preparation logic exists yet, so there is no
-  reproducibility guarantee for train/val/test splits — that lands with
-  `prepare_dataset`.
+- The original train/val/test split (`prepare_dataset`) is reproducible
+  and leakage-checked, but it is built on an eligibility state where 464
+  cross-class duplicate groups remain UNRESOLVED (see README.md) — it will
+  change as those get human-reviewed, so treat it as provisional, not final.
+- Balancing to `target_train_samples_per_class` and augmentation are not
+  yet implemented, so there is no reproducibility guarantee for those
+  stages yet.
 - No model or training loop exists yet, so weight initialization and
   training dynamics reproducibility is not yet applicable.
 - CPU-only determinism has been configured defensively but not empirically

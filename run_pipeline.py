@@ -26,6 +26,13 @@ from src.data.audit_dataset import (  # noqa: E402
     AuditFailedError,
     run_dataset_audit,
 )
+from src.data.build_split import (  # noqa: E402
+    SplitBuildError,
+    SplitValidationError,
+    run_build_split,
+)
+from src.data.duplicate_review import ReviewValidationError  # noqa: E402
+from src.data.eligibility import EligibilityValidationError  # noqa: E402
 
 
 class PipelineNotImplementedError(NotImplementedError):
@@ -146,12 +153,16 @@ def run_audit(args: argparse.Namespace) -> None:
     run_dataset_audit(config_path=args.config)
 
 
+def run_prepare_dataset(args: argparse.Namespace) -> None:
+    run_build_split(config_path=args.config, seed=args.seed)
+
+
 def dispatch(args: argparse.Namespace) -> None:
     command = args.command
 
     handlers = {
         "audit": lambda: run_audit(args),
-        "prepare_dataset": lambda: not_implemented(command, "src/data (dataset preparation)"),
+        "prepare_dataset": lambda: run_prepare_dataset(args),
         "baseline": lambda: not_implemented(command, "src/models + src/training (baseline models)"),
         "train": lambda: not_implemented(command, "src/models + src/training (AA-EvidentNet)"),
         "ablation": lambda: not_implemented(command, "src/training (ablation runner)"),
@@ -184,6 +195,12 @@ def main(argv=None) -> int:
         return 1
     except AuditFailedError as e:
         print(f"[run_pipeline] AUDIT FAILED: {e}", file=sys.stderr)
+        return 1
+    except (SplitBuildError, ReviewValidationError, EligibilityValidationError) as e:
+        print(f"[run_pipeline] SPLIT BUILD ERROR: {e}", file=sys.stderr)
+        return 1
+    except SplitValidationError as e:
+        print(f"[run_pipeline] SPLIT VALIDATION FAILED: {e}", file=sys.stderr)
         return 1
 
     return 0

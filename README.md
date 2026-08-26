@@ -74,9 +74,10 @@ duplicating the mapping here. Canonical class names and raw image counts:
 | Retinal Detachment                   | `Retinal Detachment`                                |    125 |
 | Retinitis Pigmentosa                 | `Retinitis Pigmentosa`                              |    139 |
 
-The raw-data audit (`python run_pipeline.py audit`, implemented in
-`src/data/audit_dataset.py` and friends) is complete; dataset splitting,
-balancing, and augmentation (`prepare_dataset`) are not yet implemented.
+The raw-data audit (`python run_pipeline.py audit`) and the deterministic
+original-image split (`python run_pipeline.py prepare_dataset`) are both
+implemented; balancing to `target_train_samples_per_class` and augmentation
+are not yet implemented.
 
 ### Known data-quality issue: cross-class exact duplicates (requires human review)
 
@@ -137,7 +138,7 @@ must never be split across train/val/test. `src/data/eligibility.py`
 exposes `assert_split_is_valid()` for that future stage to call; it never
 assigns a resolution or a split itself — it only refuses invalid input.
 
-#### Pipeline stages: raw dataset -> audit -> eligibility review -> eligible dataset -> future split
+#### Pipeline stages: raw dataset -> audit -> eligibility review -> eligible dataset -> original split -> future augmentation
 
 ```text
 raw dataset (data/raw/, immutable — never renamed, moved, or modified)
@@ -153,17 +154,23 @@ eligibility review (src/data/duplicate_review.py: a human resolves cross-class
 ELIGIBLE DATASET (src/data/eligibility.py: data/audit/dataset_eligibility.csv)
     |
     v
-future stratified split (NOT YET IMPLEMENTED — Task 4+)
+ORIGINAL 70/20/10 SPLIT (src/data/build_split.py: data/manifests/{train,val,test}_original.csv)
+    |
+    v
+future augmentation / balancing to target_train_samples_per_class (NOT YET IMPLEMENTED)
 ```
 
 `data/raw/` is always the permanent source archive — nothing is ever
-deleted, renamed, or relabeled there, regardless of eligibility decisions.
-The **eligible dataset** (`data/audit/dataset_eligibility.csv`) is the
-population the future split will be drawn from; excluding a file from it
-is a **data-quality decision** (an unadjudicated or rejected label
-conflict), never a class-balancing strategy — classes are not
-up- or down-weighted here, only genuinely conflicting/duplicate content is
-removed from consideration.
+deleted, renamed, or relabeled there, regardless of eligibility or split
+decisions. The **eligible dataset** (`data/audit/dataset_eligibility.csv`)
+is the population the split is drawn from; excluding a file from it is a
+**data-quality decision** (an unadjudicated or rejected label conflict),
+never a class-balancing strategy — classes are not up- or down-weighted
+here, only genuinely conflicting/duplicate content is removed from
+consideration. The split itself (below) is likewise not a balancing step:
+it is stratified proportionally by class, so a rare class stays rare in
+train/val/test — balancing to 2,000 samples/class happens only later, via
+training-only augmentation, not here.
 
 #### Eligibility layer
 
@@ -213,6 +220,73 @@ Myopia (64.2% eligible) and Glaucoma (73.5% eligible) lose the largest
 share of their images to unresolved cross-class conflicts — human review
 of the Glaucoma/Healthy and Glaucoma/Myopia groups in particular (163 and
 143 groups respectively) would recover the most data.
+
+#### Original 70/20/10 split
+
+`python run_pipeline.py prepare_dataset` (`src/data/build_split.py`) builds
+a deterministic, stratified 70/20/10 train/val/test split of the ELIGIBLE
+population only — never the raw directories directly. It:
+
+- selects only `eligible=true` rows from `dataset_eligibility.csv`, and
+  re-verifies every one still exists under `data/raw/` and still hashes to
+  its audited SHA-256 (catching any drift since the audit ran);
+- treats every exact-duplicate group as one atomic unit that always lands
+  in a single split — a same-class group's members are never divided, and
+  a cross-class group can only be part of the eligible population at all
+  once a human sets `KEEP_CLASS` (in which case the whole group's manifest
+  `class` becomes the adjudicated `resolved_class`, while
+  `dataset_eligibility.csv`'s `canonical_class` for each file is still
+  never touched);
+- allocates units to splits with a deterministic largest-remainder +
+  greedy-deficit algorithm seeded via `src/utils/seeding.set_seed()` (same
+  seed -> byte-identical manifests; different seed -> a different, still
+  valid, allocation) — never uncontrolled randomness;
+- runs 12 mandatory integrity checks before trusting any manifest
+  (`src/data/build_split.py: validate_split_manifests`) — pairwise
+  train/val/test overlap, cross-split SHA-256 overlap, duplicate-group
+  atomicity, excluded-file leakage, unresolved-cross-class leakage,
+  augmentation leakage, class-label consistency, intra-manifest
+  duplicate rows, raw-file existence/hash re-verification, and structural
+  completeness. Any failure raises `SplitValidationError` before a bad
+  manifest can be trusted.
+
+**Verified on the real dataset** (seed 42, git commit visible in
+`data/audit/split_metadata.json`): 4,393 eligible images split into
+**3,075 train (70.00%) / 880 val (20.03%) / 438 test (9.97%)** — all 12
+integrity checks PASS, all 6 same-class duplicate groups stay intact in a
+single split each, and (since all 464 cross-class groups remain
+UNRESOLVED) zero cross-class-duplicate images appear anywhere in the
+split. Per-class counts (train / val / test):
+
+| Canonical class | Train | Val | Test | Total |
+|---|---:|---:|---:|---:|
+| Central Serous Chorioretinopathy | 56 | 16 | 8 | 80 |
+| Diabetic Retinopathy | 1,015 | 290 | 145 | 1,450 |
+| Disc Edema | 77 | 23 | 10 | 110 |
+| Glaucoma | 694 | 198 | 99 | 991 |
+| Healthy | 576 | 165 | 82 | 823 |
+| Macular Scar | 246 | 71 | 35 | 352 |
+| Myopia | 225 | 64 | 32 | 321 |
+| Pterygium | 12 | 3 | 2 | 17 |
+| Retinal Detachment | 85 | 24 | 12 | 121 |
+| Retinitis Pigmentosa | 89 | 26 | 13 | 128 |
+
+Because duplicate groups must stay atomic and counts are integers, exact
+70.00/20.00/10.00 per class is not always achievable (e.g. Disc Edema
+lands at 70.00/20.91/9.09) — see `data/audit/split_distribution.csv` for
+the exact per-class deviation. This split is **provisional**: it will
+change (more images will become eligible) as cross-class duplicate groups
+get human-reviewed, so it should be regenerated after any batch of review
+decisions, not treated as final while 464 groups remain UNRESOLVED.
+
+Manifest schema (`data/manifests/{train,val,test}_original.csv`): `path`,
+`class`, `split`, `original_id`, `parent_original_id`, `is_original`,
+`augmentation_type`. Every row here has `is_original=true`,
+`parent_original_id=original_id`, `augmentation_type=original` — no
+augmented record exists yet. `original_id` is
+`sha256(canonical_class|relative_path|sha256)`: deterministic, stable
+across machines/runs, and independent of any absolute path (see
+`compute_original_id` in `src/data/build_split.py`).
 
 ### Original images vs. augmented training samples vs. clinical observations
 
@@ -292,13 +366,13 @@ All pipeline stages run through a single entry point:
 python run_pipeline.py <command> [options]
 ```
 
-Commands (recognized now; most are **not yet implemented** and will fail
-with a clear message rather than doing nothing):
+Commands (recognized now; `audit` and `prepare_dataset` are implemented,
+the rest fail with a clear message rather than doing nothing):
 
 | Command            | Purpose                                             |
 |---------------------|------------------------------------------------------|
 | `audit`             | Dataset audit: counts, duplicates, corruption, leakage |
-| `prepare_dataset`   | Build processed splits + manifests from `data/raw`  |
+| `prepare_dataset`   | Build the deterministic 70/20/10 original-image split from the eligible dataset |
 | `baseline --model maxvit` | Train/evaluate the baseline model             |
 | `train --model aa_evidentnet` | Train the proposed model                 |
 | `ablation`          | Ablation studies over proposed-model components     |

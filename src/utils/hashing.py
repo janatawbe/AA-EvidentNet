@@ -28,6 +28,15 @@ def hash_file(path: Union[str, Path], algorithm: str = "sha256") -> str:
     return hasher.hexdigest()
 
 
+def hash_string(text: str, algorithm: str = "sha256") -> str:
+    """Compute a hex digest of a UTF-8 encoded string.
+
+    Used for deterministic IDs derived from stable dataset-relative
+    information (see src.data.build_split.compute_original_id).
+    """
+    return hashlib.new(algorithm, text.encode("utf-8")).hexdigest()
+
+
 def hash_manifest(entries: Iterable[Tuple[str, str]], algorithm: str = "sha256") -> str:
     """Compute a single hex digest summarizing a manifest of (path, hash) pairs.
 
