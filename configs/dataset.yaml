@@ -127,6 +127,12 @@ audit:
   # summary but does not fail the run. Cross-class exact duplicates and any
   # structural mismatch default to "fail" because they indicate a serious
   # data-quality problem that must be resolved by a human before splitting.
+  #
+  # cross_class_duplicate applies only to groups still UNRESOLVED in
+  # data/audit/cross_class_duplicate_review.csv (see src/data/duplicate_review.py):
+  # once a human sets a group's resolution to KEEP_CLASS or EXCLUDE_GROUP,
+  # it no longer counts against this policy. This must remain "fail" until
+  # every cross-class duplicate group has been reviewed by a human.
   policies:
     missing_class_directory: fail
     unexpected_directory: fail

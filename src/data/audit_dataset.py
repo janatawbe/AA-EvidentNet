@@ -21,6 +21,7 @@ from PIL import Image
 from src.data import dataset_statistics as stats
 from src.data import detect_augmented_families as aug
 from src.data import detect_duplicates as dup
+from src.data import duplicate_review as review
 from src.data.records import INVENTORY_COLUMNS, ImageRecord, write_csv
 from src.utils.config import load_config
 from src.utils.hashing import hash_file
@@ -244,9 +245,15 @@ def _build_leakage_report(
     duplicate_groups: Sequence[dup.DuplicateGroup],
     augmentation_findings: Sequence[aug.AugmentationFinding],
     policies: Dict[str, str],
+    cross_class_review_rows: Sequence[Dict[str, Any]] = (),
 ):
     """Build leakage_report.csv rows and determine which issue types should
     fail the run, per configured policy. Returns (rows, issue_counts, failing_issue_types).
+
+    A cross-class duplicate group only counts toward the "cross_class_duplicate"
+    failing policy while it is still UNRESOLVED in cross_class_review_rows —
+    once a human has set KEEP_CLASS or EXCLUDE_GROUP, it is reported as
+    resolved (severity "info") rather than blocking the run.
     """
     rows: List[Dict[str, Any]] = []
     issue_counts: Dict[str, int] = {}
@@ -316,20 +323,30 @@ def _build_leakage_report(
     # 4. Exact duplicate groups (same-class and cross-class, reported distinctly).
     same_class_policy = policies.get("same_class_duplicate", DEFAULT_POLICIES["same_class_duplicate"])
     cross_class_policy = policies.get("cross_class_duplicate", DEFAULT_POLICIES["cross_class_duplicate"])
+    resolution_by_sha256 = {
+        row["sha256"]: row.get("resolution", review.RESOLUTION_UNRESOLVED)
+        for row in cross_class_review_rows
+    }
     has_same_class_dup = False
-    has_cross_class_dup = False
+    has_unresolved_cross_class_dup = False
     for group in duplicate_groups:
         files_desc = "; ".join(f"{r.canonical_class}/{r.path}" for r in group.records)
         if group.is_cross_class:
-            has_cross_class_dup = True
+            resolution = resolution_by_sha256.get(group.sha256, review.RESOLUTION_UNRESOLVED)
+            if resolution == review.RESOLUTION_UNRESOLVED:
+                has_unresolved_cross_class_dup = True
+                severity = _severity_for(cross_class_policy)
+            else:
+                severity = "info"  # human-resolved; no longer blocking
             add_row(
                 "cross_class_duplicate_group",
-                _severity_for(cross_class_policy),
+                severity,
                 ";".join(group.classes),
                 None,
                 None,
                 None,
-                f"{group.group_id} sha256={group.sha256} size={group.size} files=[{files_desc}]",
+                f"{group.group_id} sha256={group.sha256} size={group.size} "
+                f"resolution={resolution} files=[{files_desc}]",
             )
         else:
             has_same_class_dup = True
@@ -342,7 +359,7 @@ def _build_leakage_report(
                 None,
                 f"{group.group_id} sha256={group.sha256} size={group.size} files=[{files_desc}]",
             )
-    if has_cross_class_dup and cross_class_policy == "fail":
+    if has_unresolved_cross_class_dup and cross_class_policy == "fail":
         failing_issue_types.add("cross_class_duplicate")
     if has_same_class_dup and same_class_policy == "fail":
         failing_issue_types.add("same_class_duplicate")
@@ -388,6 +405,8 @@ class AuditSummary:
     failing_issue_types: set
     audit_dir: Path
     config_class_names: List[str] = field(default_factory=list)
+    cross_class_review_rows: List[Dict[str, Any]] = field(default_factory=list)
+    review_csv_path: Optional[Path] = None
 
     @property
     def passed(self) -> bool:
@@ -402,6 +421,7 @@ class AuditSummary:
         suspicious = sum(
             1 for f in self.augmentation_findings if f.classification == aug.SUSPICIOUS
         )
+        unresolved_cross_class = review.count_unresolved(self.cross_class_review_rows)
 
         lines = [
             "=" * 70,
@@ -414,6 +434,7 @@ class AuditSummary:
             f"Corrupted/unreadable images: {self.corrupted_count}",
             f"Exact duplicate groups (same-class): {len(same_class)}",
             f"Exact duplicate groups (CROSS-CLASS): {len(cross_class)}",
+            f"  of which still UNRESOLVED (human review required): {unresolved_cross_class}",
             f"Highly-suspicious augmentation-family findings: {highly_suspicious}",
             f"Suspicious (weaker) augmentation-family findings: {suspicious}",
             "",
@@ -424,11 +445,15 @@ class AuditSummary:
             lines.append(f"  {cls}: {count} ({pct}%)")
 
         lines.append("")
+        lines.append(f"Reports written to: {self.audit_dir}")
+        if cross_class:
+            lines.append(f"Cross-class duplicate review manifest: {self.review_csv_path}")
+            lines.append(
+                "Inspect a group visually: python -m src.data.review_duplicates --group-id <ID>"
+            )
         if self.passed:
-            lines.append(f"Reports written to: {self.audit_dir}")
             lines.append("RESULT: PASSED (no policy-'fail' issues found)")
         else:
-            lines.append(f"Reports written to: {self.audit_dir}")
             lines.append(
                 "RESULT: FAILED - policy-'fail' issue types: "
                 + ", ".join(sorted(self.failing_issue_types))
@@ -451,8 +476,14 @@ def run_dataset_audit(
     Raises:
         AuditConfigError: fatal, unrecoverable config/directory problems
             (cannot run any meaningful audit at all).
+        review.ReviewValidationError: an existing
+            cross_class_duplicate_review.csv is structurally invalid (bad
+            resolution/class values, duplicate or unknown groups). Raised
+            before that file is overwritten, to protect human review work
+            already recorded in it.
         AuditFailedError: the audit ran and wrote all reports, but one or
-            more issue types breached their configured "fail" policy.
+            more issue types breached their configured "fail" policy
+            (including any still-UNRESOLVED cross-class duplicate group).
     """
     config = load_config(config_path)
     validate_dataset_config(config)
@@ -487,8 +518,39 @@ def run_dataset_audit(
         augmentation_findings, audit_dir / "augmentation_family_report.csv"
     )
 
+    # --- Cross-class / same-class duplicate human-review workflow ---
+    # Same-class duplicates carry no label conflict; report and move on.
+    same_class_groups = dup.get_same_class_duplicate_groups(duplicate_groups)
+    same_class_rows = review.build_same_class_report_rows(same_class_groups)
+    review.write_same_class_report_csv(same_class_rows, audit_dir / "same_class_duplicate_report.csv")
+
+    # Cross-class duplicates are label conflicts: never auto-resolved. Merge
+    # fresh facts with any pre-existing human resolutions, validating the
+    # pre-existing file BEFORE overwriting it so a corrupt file can't
+    # silently destroy completed review work.
+    cross_class_groups = dup.get_cross_class_duplicate_groups(duplicate_groups)
+    review_csv_path = audit_dir / "cross_class_duplicate_review.csv"
+    existing_review_rows = review.load_review_csv(review_csv_path)
+    if existing_review_rows:
+        review.assert_valid_review_rows(existing_review_rows, class_directory_mapping.keys())
+
+    fresh_review_rows = review.build_cross_class_review_rows(cross_class_groups)
+    merged_review_rows = review.merge_review_rows(existing_review_rows, fresh_review_rows)
+    review.assert_valid_review_rows(
+        merged_review_rows,
+        class_directory_mapping.keys(),
+        expected_sha256_set={g.sha256 for g in cross_class_groups},
+    )
+    review.write_cross_class_review_csv(merged_review_rows, review_csv_path)
+    review.write_summary_csv(
+        merged_review_rows,
+        class_directory_mapping.keys(),
+        audit_dir / "cross_class_duplicate_summary.csv",
+    )
+
     leakage_rows, issue_counts, failing_issue_types = _build_leakage_report(
-        directory_validation, records, duplicate_groups, augmentation_findings, policies
+        directory_validation, records, duplicate_groups, augmentation_findings, policies,
+        cross_class_review_rows=merged_review_rows,
     )
     write_csv(leakage_rows, LEAKAGE_REPORT_COLUMNS, audit_dir / "leakage_report.csv")
 
@@ -503,15 +565,28 @@ def run_dataset_audit(
         failing_issue_types=failing_issue_types,
         audit_dir=audit_dir,
         config_class_names=sorted(class_directory_mapping.keys()),
+        cross_class_review_rows=merged_review_rows,
+        review_csv_path=review_csv_path,
     )
 
     print(summary.format_report())
 
     if not summary.passed:
-        raise AuditFailedError(
+        message_parts = [
             "Dataset audit FAILED policy checks: "
             + ", ".join(sorted(summary.failing_issue_types))
-            + f". See {audit_dir} for full reports."
-        )
+            + "."
+        ]
+        if "cross_class_duplicate" in summary.failing_issue_types:
+            unresolved_count = review.count_unresolved(merged_review_rows)
+            message_parts.append(
+                f"HUMAN REVIEW REQUIRED: {unresolved_count} cross-class exact-duplicate "
+                f"group(s) are unresolved. Resolve each group's 'resolution' column to "
+                f"KEEP_CLASS or EXCLUDE_GROUP in {review_csv_path} (never inferred "
+                f"automatically). Inspect a group visually with: "
+                f"python -m src.data.review_duplicates --group-id <ID>."
+            )
+        message_parts.append(f"See {audit_dir} for full reports.")
+        raise AuditFailedError(" ".join(message_parts))
 
     return summary

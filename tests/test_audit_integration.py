@@ -9,6 +9,7 @@ import csv
 import pytest
 
 from src.data.audit_dataset import AuditConfigError, AuditFailedError, run_dataset_audit
+from src.data.duplicate_review import ReviewValidationError
 from tests.conftest import make_image, make_invalid_image, write_min_dataset_config
 
 MAPPING = {
@@ -214,3 +215,144 @@ def test_policy_override_can_make_unexpected_directory_warn_only(tmp_path):
 
     summary = run_dataset_audit(config_path=config_path)  # must not raise
     assert summary.passed
+
+
+# --- Human-review workflow: cross-class duplicate manifest, merge, validation ---
+
+
+def _make_cross_class_duplicate_fixture(tmp_path):
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    make_image(raw_dir / "Alpha" / "a1.jpg", size=(30, 30), color=(5, 6, 7))
+    (raw_dir / "Beta Disease [Raw]").mkdir(parents=True, exist_ok=True)
+    import shutil
+
+    shutil.copyfile(raw_dir / "Alpha" / "a1.jpg", raw_dir / "Beta Disease [Raw]" / "b1.jpg")
+    config_path = write_min_dataset_config(tmp_path, MAPPING, raw_dir, audit_dir)
+    return config_path, audit_dir
+
+
+def test_review_manifest_written_with_all_groups_unresolved(tmp_path):
+    config_path, audit_dir = _make_cross_class_duplicate_fixture(tmp_path)
+
+    with pytest.raises(AuditFailedError):
+        run_dataset_audit(config_path=config_path)
+
+    review_rows = _read_csv(audit_dir / "cross_class_duplicate_review.csv")
+    assert len(review_rows) == 1
+    assert review_rows[0]["resolution"] == "UNRESOLVED"
+    assert review_rows[0]["resolved_class"] == ""
+
+
+def test_audit_failure_message_says_human_review_required(tmp_path):
+    config_path, audit_dir = _make_cross_class_duplicate_fixture(tmp_path)
+
+    with pytest.raises(AuditFailedError, match="HUMAN REVIEW REQUIRED"):
+        run_dataset_audit(config_path=config_path)
+
+
+def test_rerun_after_human_keep_class_resolution_passes(tmp_path):
+    config_path, audit_dir = _make_cross_class_duplicate_fixture(tmp_path)
+
+    with pytest.raises(AuditFailedError):
+        run_dataset_audit(config_path=config_path)
+
+    # Simulate a human editing the review manifest directly.
+    review_path = audit_dir / "cross_class_duplicate_review.csv"
+    rows = _read_csv(review_path)
+    rows[0]["resolution"] = "KEEP_CLASS"
+    rows[0]["resolved_class"] = "Alpha"
+    rows[0]["reviewer"] = "dr_smith"
+    rows[0]["notes"] = "chart review confirms Alpha"
+    fieldnames = list(rows[0].keys())
+    with open(review_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    summary = run_dataset_audit(config_path=config_path)  # must not raise now
+    assert summary.passed
+
+    # The human resolution must survive being re-written by this second run.
+    rows_after = _read_csv(review_path)
+    assert rows_after[0]["resolution"] == "KEEP_CLASS"
+    assert rows_after[0]["resolved_class"] == "Alpha"
+    assert rows_after[0]["reviewer"] == "dr_smith"
+
+
+def test_rerun_after_human_exclude_group_resolution_passes(tmp_path):
+    config_path, audit_dir = _make_cross_class_duplicate_fixture(tmp_path)
+
+    with pytest.raises(AuditFailedError):
+        run_dataset_audit(config_path=config_path)
+
+    review_path = audit_dir / "cross_class_duplicate_review.csv"
+    rows = _read_csv(review_path)
+    rows[0]["resolution"] = "EXCLUDE_GROUP"
+    rows[0]["resolved_class"] = ""
+    fieldnames = list(rows[0].keys())
+    with open(review_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    summary = run_dataset_audit(config_path=config_path)  # must not raise
+    assert summary.passed
+
+
+def test_corrupted_existing_review_file_raises_and_is_not_overwritten(tmp_path):
+    config_path, audit_dir = _make_cross_class_duplicate_fixture(tmp_path)
+
+    with pytest.raises(AuditFailedError):
+        run_dataset_audit(config_path=config_path)
+
+    review_path = audit_dir / "cross_class_duplicate_review.csv"
+    rows = _read_csv(review_path)
+    rows[0]["resolution"] = "MAYBE_MAYBE_NOT"  # invalid value, simulating a typo
+    fieldnames = list(rows[0].keys())
+    with open(review_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    corrupted_content = review_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ReviewValidationError):
+        run_dataset_audit(config_path=config_path)
+
+    # The corrupted human file must be left untouched, not silently overwritten.
+    assert review_path.read_text(encoding="utf-8") == corrupted_content
+
+
+def test_same_class_duplicate_report_generated_separately(tmp_path):
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    make_image(raw_dir / "Alpha" / "a1.jpg", size=(30, 30), color=(8, 8, 8))
+    import shutil
+
+    shutil.copyfile(raw_dir / "Alpha" / "a1.jpg", raw_dir / "Alpha" / "a2.jpg")
+    make_image(raw_dir / "Beta Disease [Raw]" / "b1.jpg")
+    config_path = write_min_dataset_config(tmp_path, MAPPING, raw_dir, audit_dir)
+
+    summary = run_dataset_audit(config_path=config_path)
+    assert summary.passed
+
+    same_class_rows = _read_csv(audit_dir / "same_class_duplicate_report.csv")
+    assert len(same_class_rows) == 1
+    assert same_class_rows[0]["canonical_class"] == "Alpha"
+
+    # No cross-class review rows since there's no cross-class conflict here.
+    cross_class_rows = _read_csv(audit_dir / "cross_class_duplicate_review.csv")
+    assert cross_class_rows == []
+
+
+def test_cross_class_duplicate_summary_reflects_resolution_state(tmp_path):
+    config_path, audit_dir = _make_cross_class_duplicate_fixture(tmp_path)
+
+    with pytest.raises(AuditFailedError):
+        run_dataset_audit(config_path=config_path)
+
+    summary_rows = _read_csv(audit_dir / "cross_class_duplicate_summary.csv")
+    as_dict = {(r["metric"], r["key"]): r["value"] for r in summary_rows}
+    assert as_dict[("total_conflicting_groups", "")] == "1"
+    assert as_dict[("groups_unresolved", "")] == "1"
+    assert as_dict[("total_affected_files", "")] == "2"
