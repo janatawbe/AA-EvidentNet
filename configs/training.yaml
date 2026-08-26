@@ -1,0 +1,36 @@
+# Training configuration.
+#
+# NOTE: These are PROVISIONAL defaults for scaffolding the CLI and config
+# loading only. No training loop exists yet; values are not tuned.
+
+seed: 42
+device: auto  # one of: auto, cpu, cuda
+smoke_test: false
+
+batch_size: 16
+epochs: 50
+num_workers: 4
+
+optimizer:
+  name: adamw
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  name: cosine
+  warmup_epochs: 5
+
+early_stopping:
+  enabled: true
+  patience: 10
+  monitor: val_loss
+
+mc_samples: 20  # Monte Carlo forward passes for uncertainty estimation.
+
+checkpointing:
+  save_dir: results/checkpoints
+  save_best_only: true
+
+logging:
+  log_dir: results/logs
+  log_every_n_steps: 10

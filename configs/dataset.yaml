@@ -1,0 +1,55 @@
+# Dataset configuration for the DS2 retinal disease dataset.
+#
+# NOTE: `target_train_samples_per_class` and split ratios are PROVISIONAL
+# defaults, not scientifically tuned values. They must be revisited once the
+# data audit (experiments/00_data_audit) quantifies per-class counts,
+# duplicates, and quality issues.
+
+seed: 42
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  manifests_dir: data/manifests
+  audit_dir: data/audit
+
+# Class names must exactly match the subfolder names under data/raw/.
+class_names:
+  - "Central Serous Chorioretinopathy [Color Fundus]"
+  - "Diabetic Retinopathy"
+  - "Disc Edema"
+  - "Glaucoma"
+  - "Healthy"
+  - "Macular Scar"
+  - "Myopia"
+  - "Pterygium"
+  - "Retinal Detachment"
+  - "Retinitis Pigmentosa"
+
+num_classes: 10
+
+image:
+  size: 224
+  channels: 3
+  # Provisional; not yet computed from the actual dataset.
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+split:
+  # PROVISIONAL. Stratification strategy and exact ratios must be finalized
+  # after the data audit (class imbalance ranges from 17 to 1509 images).
+  train_fraction: 0.70
+  val_fraction: 0.15
+  test_fraction: 0.15
+  stratified: true
+
+# Target number of training samples per class after any balancing strategy
+# (oversampling / augmentation / undersampling) is applied. PROVISIONAL —
+# the real dataset's smallest class (Pterygium, 17 images) is far below this.
+target_train_samples_per_class: 2000
+
+dataloader:
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  shuffle_train: true

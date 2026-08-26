@@ -1,0 +1,22 @@
+# AA-EvidentNet requirements.
+#
+# Versions below reflect what is verified working in the current dev
+# environment (Python 3.10.11, Windows, CPU-only torch build). If you have
+# a CUDA-capable GPU, install a CUDA build of torch instead — see
+# https://pytorch.org/get-started/locally/ and REPRODUCIBILITY.md.
+
+torch==2.10.0          # CPU-only wheel in the reference environment (torch==2.10.0+cpu)
+numpy==2.2.6
+pandas==2.3.3
+pillow==12.1.1
+PyYAML==6.0.3
+scikit-learn==1.7.2
+
+# Dev / testing
+pytest==9.1.1
+
+# Anticipated for later tasks (visualization, progress bars); not required
+# by the current foundation code, listed here so later tasks don't need to
+# revisit this file for basic plotting/CLI needs.
+matplotlib
+tqdm

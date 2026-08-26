@@ -1,0 +1,120 @@
+"""Tests for run_pipeline.py CLI parsing and dispatch behavior.
+
+At this stage of the project, every command is recognized by the parser but
+raises a clear "not implemented" error when dispatched. These tests check
+that: (1) the parser accepts all required commands and options, (2) invalid
+usage is rejected, and (3) dispatch fails loudly and informatively rather
+than silently succeeding.
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+import run_pipeline  # noqa: E402
+
+ALL_COMMANDS = [
+    "audit",
+    "prepare_dataset",
+    "ablation",
+    "hard_pairs",
+    "calibration",
+    "selective",
+    "gradcam",
+    "robustness",
+    "multi_seed",
+    "publication",
+    "final_test",
+]
+
+MODEL_COMMANDS = ["baseline", "train"]
+
+
+@pytest.mark.parametrize("command", ALL_COMMANDS)
+def test_parser_accepts_bare_command(command):
+    parser = run_pipeline.build_parser()
+    args = parser.parse_args([command])
+    assert args.command == command
+    assert args.seed == run_pipeline.DEFAULT_SEED
+
+
+@pytest.mark.parametrize("command", MODEL_COMMANDS)
+def test_parser_requires_model_for_train_and_baseline(command):
+    parser = run_pipeline.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([command])  # missing required --model
+
+
+@pytest.mark.parametrize("command", MODEL_COMMANDS)
+def test_parser_accepts_model_argument(command):
+    parser = run_pipeline.build_parser()
+    args = parser.parse_args([command, "--model", "maxvit"])
+    assert args.model == "maxvit"
+
+
+def test_parser_common_options():
+    parser = run_pipeline.build_parser()
+    args = parser.parse_args(
+        [
+            "audit",
+            "--config",
+            "configs/dataset.yaml",
+            "--seed",
+            "123",
+            "--device",
+            "cpu",
+            "--batch-size",
+            "32",
+            "--epochs",
+            "5",
+            "--num-workers",
+            "2",
+            "--smoke-test",
+        ]
+    )
+    assert args.config == "configs/dataset.yaml"
+    assert args.seed == 123
+    assert args.device == "cpu"
+    assert args.batch_size == 32
+    assert args.epochs == 5
+    assert args.num_workers == 2
+    assert args.smoke_test is True
+
+
+def test_parser_rejects_unknown_command():
+    parser = run_pipeline.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["not_a_real_command"])
+
+
+def test_parser_rejects_invalid_device():
+    parser = run_pipeline.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["audit", "--device", "tpu"])
+
+
+def test_parser_requires_a_command():
+    parser = run_pipeline.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+
+
+@pytest.mark.parametrize("command", ALL_COMMANDS)
+def test_main_fails_clearly_for_unimplemented_commands(command, capsys):
+    exit_code = run_pipeline.main([command])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "NOT IMPLEMENTED" in captured.err
+    assert command in captured.err
+
+
+@pytest.mark.parametrize("command", MODEL_COMMANDS)
+def test_main_fails_clearly_for_unimplemented_model_commands(command, capsys):
+    exit_code = run_pipeline.main([command, "--model", "maxvit"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "NOT IMPLEMENTED" in captured.err

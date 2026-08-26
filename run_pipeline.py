@@ -1,0 +1,177 @@
+#!/usr/bin/env python
+"""AA-EvidentNet pipeline CLI.
+
+This is the single entry point for the project's experiment pipeline. At
+this stage (foundation setup), the CLI structure and argument parsing are
+complete, but the underlying pipeline stages are not yet implemented. Each
+command fails with a clear NotImplementedError-derived message rather than
+doing nothing silently.
+
+Usage:
+    python run_pipeline.py <command> [options]
+
+Run `python run_pipeline.py --help` or `python run_pipeline.py <command>
+--help` for details.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from src.utils.seeding import DEFAULT_SEED  # noqa: E402
+
+
+class PipelineNotImplementedError(NotImplementedError):
+    """Raised by a command handler that is recognized but not yet built."""
+
+
+DEFAULT_CONFIGS = {
+    "audit": "configs/dataset.yaml",
+    "prepare_dataset": "configs/dataset.yaml",
+    "baseline": "configs/models.yaml",
+    "train": "configs/models.yaml",
+    "ablation": "configs/experiments.yaml",
+    "hard_pairs": "configs/evaluation.yaml",
+    "calibration": "configs/evaluation.yaml",
+    "selective": "configs/evaluation.yaml",
+    "gradcam": "configs/evaluation.yaml",
+    "robustness": "configs/evaluation.yaml",
+    "multi_seed": "configs/experiments.yaml",
+    "publication": "configs/experiments.yaml",
+    "final_test": "configs/evaluation.yaml",
+}
+
+
+def add_common_arguments(subparser: argparse.ArgumentParser, command: str) -> None:
+    subparser.add_argument(
+        "--config",
+        type=str,
+        default=DEFAULT_CONFIGS.get(command),
+        help="Path to a YAML config file (default: %(default)s).",
+    )
+    subparser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=f"Random seed (default: {DEFAULT_SEED}).",
+    )
+    subparser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Compute device (default: auto).",
+    )
+    subparser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override the batch size from the config.",
+    )
+    subparser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Override the number of epochs from the config.",
+    )
+    subparser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Override the number of dataloader workers from the config.",
+    )
+    subparser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run a fast, reduced-scope version of this command for sanity checking.",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="run_pipeline.py",
+        description="AA-EvidentNet experiment pipeline CLI.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    commands = [
+        ("audit", "Run the dataset audit (class counts, duplicates, corruption, leakage checks)."),
+        ("prepare_dataset", "Build processed dataset splits and manifests from data/raw."),
+        ("baseline", "Train/evaluate a baseline model (e.g. MaxViT)."),
+        ("train", "Train the proposed AA-EvidentNet model."),
+        ("ablation", "Run ablation studies over AA-EvidentNet components."),
+        ("hard_pairs", "Analyze visually/clinically confusable class pairs."),
+        ("calibration", "Evaluate calibration and uncertainty quantification."),
+        ("selective", "Evaluate selective prediction / risk-coverage behavior."),
+        ("gradcam", "Generate Grad-CAM and other interpretability visualizations."),
+        ("robustness", "Evaluate robustness to input perturbations."),
+        ("multi_seed", "Aggregate results across the project's multi-seed runs."),
+        ("publication", "Assemble publication-ready tables and figures."),
+        ("final_test", "Run the final held-out test evaluation."),
+    ]
+
+    for name, help_text in commands:
+        sub = subparsers.add_parser(name, help=help_text, description=help_text)
+        add_common_arguments(sub, name)
+        if name in ("baseline", "train"):
+            sub.add_argument(
+                "--model",
+                type=str,
+                required=True,
+                help="Model name (see configs/models.yaml registry, "
+                "e.g. 'maxvit' or 'aa_evidentnet').",
+            )
+
+    return parser
+
+
+def not_implemented(command: str, target_module: str) -> None:
+    raise PipelineNotImplementedError(
+        f"Command '{command}' is recognized but not yet implemented.\n"
+        f"It will be implemented in {target_module}.\n"
+        f"This is expected at the current stage of the project "
+        f"(foundation setup only) - no dataset pipeline, model, or "
+        f"training code exists yet."
+    )
+
+
+def dispatch(args: argparse.Namespace) -> None:
+    command = args.command
+
+    handlers = {
+        "audit": lambda: not_implemented(command, "src/data (dataset audit)"),
+        "prepare_dataset": lambda: not_implemented(command, "src/data (dataset preparation)"),
+        "baseline": lambda: not_implemented(command, "src/models + src/training (baseline models)"),
+        "train": lambda: not_implemented(command, "src/models + src/training (AA-EvidentNet)"),
+        "ablation": lambda: not_implemented(command, "src/training (ablation runner)"),
+        "hard_pairs": lambda: not_implemented(command, "src/evaluation (hard pairs analysis)"),
+        "calibration": lambda: not_implemented(command, "src/evaluation (calibration/uncertainty)"),
+        "selective": lambda: not_implemented(command, "src/evaluation (selective prediction)"),
+        "gradcam": lambda: not_implemented(command, "src/visualization (Grad-CAM)"),
+        "robustness": lambda: not_implemented(command, "src/evaluation (robustness)"),
+        "multi_seed": lambda: not_implemented(command, "src/statistics (multi-seed aggregation)"),
+        "publication": lambda: not_implemented(command, "src/visualization + src/statistics (publication assets)"),
+        "final_test": lambda: not_implemented(command, "src/evaluation (final held-out test)"),
+    }
+
+    handlers[command]()
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        dispatch(args)
+    except PipelineNotImplementedError as e:
+        print(f"[run_pipeline] NOT IMPLEMENTED: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

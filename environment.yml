@@ -1,0 +1,20 @@
+name: aa-evidentnet
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy=2.2.6
+  - pandas=2.3.3
+  - pillow=12.1.1
+  - pyyaml=6.0.3
+  - scikit-learn=1.7.2
+  - matplotlib
+  - tqdm
+  - pytest=9.1.1
+  - pip:
+      # CPU-only build verified in the reference environment. Replace with
+      # a CUDA-enabled build (see REPRODUCIBILITY.md) if a GPU is available.
+      - torch==2.10.0

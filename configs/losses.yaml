@@ -1,0 +1,20 @@
+# Loss function configuration.
+#
+# NOTE: No loss functions are implemented yet. Names and weights below are
+# PROVISIONAL placeholders reserving the schema, not scientifically
+# justified hyperparameters.
+
+seed: 42
+
+baseline:
+  name: cross_entropy
+  label_smoothing: 0.0
+  class_weighting: none  # one of: none, inverse_frequency, effective_number
+
+proposed:
+  # PROVISIONAL: evidential deep learning loss (e.g. Dirichlet-based) is
+  # planned but not yet implemented or tuned.
+  name: evidential
+  kl_annealing_epochs: 10
+  kl_weight_max: 1.0
+  regularizer_weight: 1.0

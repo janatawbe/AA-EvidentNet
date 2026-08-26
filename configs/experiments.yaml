@@ -1,0 +1,37 @@
+# Experiment registry.
+#
+# Maps CLI commands to their experiment directories under experiments/, and
+# defines the seeds used for multi-seed robustness reporting. No experiment
+# logic is implemented yet; this only fixes the naming/schema.
+
+seed: 42
+default_seeds: [42, 123, 456, 789, 2026]
+
+registry:
+  audit:
+    dir: experiments/00_data_audit
+    description: "Dataset audit: class counts, duplicates, corrupt files, leakage checks."
+  baseline:
+    dir: experiments/01_baselines
+    description: "Baseline model training (e.g. MaxViT)."
+  train:
+    dir: experiments/02_proposed_model
+    description: "AA-EvidentNet training."
+  ablation:
+    dir: experiments/03_ablation
+    description: "Ablation studies over AA-EvidentNet components."
+  hard_pairs:
+    dir: experiments/04_hard_pairs
+    description: "Analysis of visually/clinically confusable class pairs."
+  calibration:
+    dir: experiments/05_calibration_uncertainty
+    description: "Calibration and uncertainty quantification evaluation."
+  selective:
+    dir: experiments/06_selective_prediction
+    description: "Selective prediction / risk-coverage evaluation."
+  gradcam:
+    dir: experiments/07_interpretability
+    description: "Grad-CAM and other interpretability visualizations."
+  robustness:
+    dir: experiments/08_robustness
+    description: "Robustness to input perturbations."

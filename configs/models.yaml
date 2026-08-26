@@ -1,0 +1,32 @@
+# Model configuration.
+#
+# NOTE: No model architectures are implemented yet. This config only
+# reserves the parameter surface so training/eval code can be written
+# against a stable schema. Values are PROVISIONAL defaults.
+
+seed: 42
+
+embedding_dim: 256
+num_classes: 10
+image_size: 224
+
+baseline:
+  name: maxvit
+  # PROVISIONAL: exact MaxViT variant (tiny/small/base) not yet decided.
+  variant: maxvit_t
+  pretrained: true
+  freeze_backbone: false
+
+proposed:
+  name: aa_evidentnet
+  # PROVISIONAL placeholder architecture description; not yet implemented.
+  backbone: maxvit_t
+  pretrained: true
+  uncertainty_head: evidential
+  mc_samples: 20
+
+registry:
+  # Maps CLI --model values to config sections above. Extend as new models
+  # are added; do not implement model code until this task's scope allows it.
+  maxvit: baseline
+  aa_evidentnet: proposed

@@ -1,0 +1,42 @@
+# Evaluation configuration.
+#
+# NOTE: No evaluation code is implemented yet. This reserves the parameter
+# schema for later tasks (calibration, selective prediction, robustness).
+# Thresholds/bin counts below are PROVISIONAL defaults.
+
+seed: 42
+
+metrics:
+  - accuracy
+  - balanced_accuracy
+  - precision_macro
+  - recall_macro
+  - f1_macro
+  - auroc_macro
+  - confusion_matrix
+
+calibration:
+  num_bins: 15
+  metrics: [ece, mce, brier_score]
+
+uncertainty:
+  mc_samples: 20
+  methods: [mc_dropout, evidential]
+
+selective_prediction:
+  # PROVISIONAL coverage sweep for risk-coverage curves.
+  coverage_levels: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
+
+robustness:
+  # PROVISIONAL perturbation set for stress-testing.
+  perturbations: [gaussian_noise, brightness, contrast, blur, jpeg_compression]
+
+statistics:
+  multi_seed_seeds: [42, 123, 456, 789, 2026]
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output_paths:
+  tables_dir: results/tables
+  figures_dir: results/figures
+  raw_predictions_dir: results/raw_predictions
