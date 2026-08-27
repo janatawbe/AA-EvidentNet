@@ -1,16 +1,20 @@
-"""AA-EvidentNet architecture (Task 7): Ambiguity-Aware Global-Local
-Representation Learning with Evidential Uncertainty for Reliable
-Multi-Class Ophthalmic Classification.
+"""AA-EvidentNet architecture (Task 7) + evidential uncertainty head
+(Task 9): Ambiguity-Aware Global-Local Representation Learning with
+Evidential Uncertainty for Reliable Multi-Class Ophthalmic Classification.
 
-ARCHITECTURE ONLY. This module deliberately does NOT implement:
-  - CS-SupCon (supervised contrastive) training objective
-  - EDL (evidential deep learning) loss / Dirichlet uncertainty head
-  - any training loop, ablation, or evaluation logic
-Those are later tasks. What this module DOES provide is the full forward
-architecture those later tasks will attach to: a global branch, a local
-branch, learnable adaptive fusion into a shared embedding, and a
-classification head - with every intermediate representation exposed for
-reuse (global feature, local feature, fused embedding, logits, alpha).
+This module deliberately does NOT implement:
+  - CS-SupCon (supervised contrastive) training loss (src/losses/cs_supcon.py,
+    Task 8 - operates on the fused embedding this module exposes)
+  - the EDL loss itself (src/losses/evidential.py, Task 9 - this module
+    only attaches the EvidentialHead and exposes its outputs)
+  - any training loop, ablation, evaluation logic, or combined objective
+Those are separate, later-integrated pieces. What this module DOES
+provide is the full forward architecture: a global branch, a local
+branch, learnable adaptive fusion into a shared embedding, an ordinary
+classification head, AND an evidential head on the same shared embedding
+- with every intermediate representation exposed for reuse (global
+feature, local feature, fused embedding, logits, fusion alpha, evidence,
+Dirichlet alpha, probabilities, uncertainty).
 
     Global branch (MaxViT backbone, configurable)
         images -> timm backbone (num_classes=0, pooled features)
@@ -24,8 +28,15 @@ reuse (global feature, local feature, fused embedding, logits, alpha).
         alpha = sigmoid(learnable scalar parameter)   # in (0, 1)
         fused = alpha * global_feature + (1 - alpha) * local_feature
 
-    Classification head
+    Classification head (unchanged from Task 7)
         logits = Linear(embedding_dim, num_classes)(fused)
+
+    Evidential head (Task 9, src/losses/evidential.py: EvidentialHead)
+        raw_evidential_output = Linear(embedding_dim, num_classes)(fused)
+        evidence = softplus(raw_evidential_output); alpha_dirichlet = evidence + 1
+        probabilities = alpha_dirichlet / sum(alpha_dirichlet); uncertainty = K / sum(alpha_dirichlet)
+        -- a SEPARATE Linear layer from the classifier above; ordinary
+        `logits` are never removed, repurposed, or affected by this.
 
 Interface mirrors src.models.base.TimmBackboneModel exactly, so
 AA-EvidentNet is a drop-in replacement anywhere a baseline model is used
@@ -33,6 +44,11 @@ AA-EvidentNet is a drop-in replacement anywhere a baseline model is used
 
     logits = model(images)                          # [B, num_classes]
     output = model(images, return_features=True)     # AAEvidentNetOutput
+
+The evidential outputs (evidence/dirichlet_alpha/probabilities/uncertainty)
+are only computed and populated when `return_features=True`, so the plain
+`model(images)` path used by the existing Trainer's forward/backward step
+is completely unaffected by this addition.
 """
 
 from dataclasses import dataclass
@@ -42,21 +58,31 @@ import timm
 import torch
 import torch.nn as nn
 
+from src.losses.evidential import EvidentialHead
 from src.models.base import ModelOutput, UnknownModelError
 
 
 @dataclass
 class AAEvidentNetOutput(ModelOutput):
     """Extends ModelOutput (logits, features) with the extra
-    representations later tasks (CS-SupCon, EDL, Grad-CAM, uncertainty)
-    will need. `features` aliases `embedding` (the fused representation)
-    so any code written against the baseline ModelOutput interface still
-    works unchanged."""
+    representations CS-SupCon/EDL/Grad-CAM need. `features` aliases
+    `embedding` (the fused representation) so any code written against the
+    baseline ModelOutput interface still works unchanged.
+
+    `alpha` (Task 7) is the scalar global/local FUSION gate - unrelated to
+    `dirichlet_alpha` (Task 9), the per-class Dirichlet concentration
+    parameters from the evidential head. Distinct names are used
+    deliberately to avoid confusing the two."""
 
     embedding: Optional[torch.Tensor] = None
     global_feature: Optional[torch.Tensor] = None
     local_feature: Optional[torch.Tensor] = None
     alpha: Optional[torch.Tensor] = None
+    evidential_raw: Optional[torch.Tensor] = None
+    evidence: Optional[torch.Tensor] = None
+    dirichlet_alpha: Optional[torch.Tensor] = None
+    probabilities: Optional[torch.Tensor] = None
+    uncertainty: Optional[torch.Tensor] = None
 
 
 class LocalBranch(nn.Module):
@@ -131,6 +157,10 @@ class AAEvidentNet(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.classifier = nn.Linear(embedding_dim, num_classes)
 
+        # Task 9: a separate evidential head on the same shared embedding.
+        # Does not touch or replace `self.classifier`/`logits` in any way.
+        self.evidential_head = EvidentialHead(embedding_dim, num_classes)
+
         # Interface parity with TimmBackboneModel: `feature_dim` is what
         # generic code (checkpointing, future evaluation code) reads to
         # learn the size of "the" representation - for AA-EvidentNet
@@ -166,6 +196,8 @@ class AAEvidentNet(nn.Module):
         if not return_features:
             return logits
 
+        evidential_output = self.evidential_head(fused)
+
         return AAEvidentNetOutput(
             logits=logits,
             features=fused,
@@ -173,4 +205,9 @@ class AAEvidentNet(nn.Module):
             global_feature=global_feature,
             local_feature=local_feature,
             alpha=alpha.expand(batch_size, 1),
+            evidential_raw=evidential_output.raw_output,
+            evidence=evidential_output.evidence,
+            dirichlet_alpha=evidential_output.alpha,
+            probabilities=evidential_output.probabilities,
+            uncertainty=evidential_output.uncertainty,
         )

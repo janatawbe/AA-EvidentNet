@@ -35,16 +35,17 @@ about what the answers are.
   full training run completed)**: ResNet50, EfficientNetB0, and MaxViT
   (`maxvit_tiny_tf_224`), each with a standard softmax / cross-entropy
   head. See "Baseline models" and "Training engine" below.
-- **Proposed (AA-EvidentNet, architecture implemented; CS-SupCon loss
-  implemented; combined training objective not yet wired up)**: a MaxViT
-  global branch + a lightweight convolutional local branch, fused via a
-  learnable sigmoid-gated `alpha` into a shared 256-d embedding, with a
-  linear classification head. The CS-SupCon supervised-contrastive loss
-  (`src/losses/cs_supcon.py`) is implemented as a standalone, unit-tested
-  module. The evidential (Dirichlet-based) uncertainty head and its
-  training loss, and the training loop that combines classification +
-  CS-SupCon + EDL, are **not yet implemented** — see "AA-EvidentNet: the
-  proposed model" below.
+- **Proposed (AA-EvidentNet, architecture + evidential head implemented;
+  CS-SupCon and EDL losses implemented; combined training objective not
+  yet wired up)**: a MaxViT global branch + a lightweight convolutional
+  local branch, fused via a learnable sigmoid-gated `alpha` into a shared
+  256-d embedding, with a linear classification head AND a separate
+  Dirichlet-based evidential head (both on the same fused embedding). The
+  CS-SupCon supervised-contrastive loss (`src/losses/cs_supcon.py`, Task 8)
+  and the EDL loss (`src/losses/evidential.py`, Task 9) are each
+  implemented as standalone, unit-tested modules. The training loop that
+  combines classification + CS-SupCon + EDL into one objective is **not
+  yet implemented** — see "AA-EvidentNet: the proposed model" below.
 
 Exact architecture details, hyperparameters, and loss formulations for the
 proposed model's future training objective are **provisional** (see
@@ -594,17 +595,19 @@ repository.** That requires the target CUDA (RTX 3050 6GB) environment
 and is left for whenever that hardware is available — this task
 deliberately stops at "the engine works, end to end, on real data."
 
-## AA-EvidentNet: the proposed model (architecture — Task 7; CS-SupCon loss — Task 8)
+## AA-EvidentNet: the proposed model (architecture — Task 7; CS-SupCon loss — Task 8; EDL — Task 9)
 
 **Ambiguity-Aware Global-Local Representation Learning with Evidential
 Uncertainty for Reliable Multi-Class Ophthalmic Classification.** The
-forward architecture (`src/models/aa_evidentnet.py`, Task 7) and the
-CS-SupCon supervised-contrastive loss (`src/losses/cs_supcon.py`, Task 8)
-are implemented. The EDL (evidential deep learning) training objective,
-the uncertainty head, the combined training loop wiring these losses
-together, ablations, and any training run are explicitly **not yet
-implemented** (later tasks). `configs/models.yaml: proposed.aa_evidentnet.uncertainty_head`/
-`mc_samples` are reserved placeholders, not read by the current code.
+forward architecture (`src/models/aa_evidentnet.py`, Task 7), the
+CS-SupCon supervised-contrastive loss (`src/losses/cs_supcon.py`, Task 8),
+and the evidential (Dirichlet-based) uncertainty head + EDL loss
+(`src/losses/evidential.py`, Task 9) are all implemented. The combined
+training loop wiring classification + CS-SupCon + EDL together into one
+objective, ablations, and any training run are explicitly **not yet
+implemented** (later tasks). `configs/models.yaml:
+proposed.aa_evidentnet.mc_samples` remains a reserved placeholder (a
+possible future MC-dropout addition), not read by the current code.
 
 ```text
                     ┌─── global branch ───┐
@@ -652,14 +655,17 @@ implemented** (later tasks). `configs/models.yaml: proposed.aa_evidentnet.uncert
   dataclass extending `src.models.base.ModelOutput`, so any code written
   against the baseline `logits`/`features` interface still works
   unchanged): `logits`, `features`/`embedding` (the fused representation,
-  identical), `global_feature`, `local_feature`, and `alpha` — exactly the
-  set later tasks (CS-SupCon, EDL, Grad-CAM, uncertainty) will need,
-  without those objectives being implemented yet.
+  identical), `global_feature`, `local_feature`, `alpha` (the fusion
+  gate), and — since Task 9 — `evidential_raw`, `evidence`,
+  `dirichlet_alpha`, `probabilities`, and `uncertainty` from the
+  evidential head (see "EDL" below). Grad-CAM support is still a later
+  task.
 
 **Verified real parameter count** (`pretrained=False`, default config):
-**30,811,987** total — ~30.4M from the MaxViT-tiny global backbone (>90%
+**30,814,557** total — ~30.4M from the MaxViT-tiny global backbone (>90%
 of the total, as expected for a "lightweight" local branch) plus the
-local branch, two projection layers, and the classifier.
+local branch, two projection layers, the classifier, and (since Task 9)
+the evidential head's `Linear(256, 10)` (2,570 params).
 
 `create_model("aa_evidentnet", config)` works through the exact same
 factory used by the three baselines (`src/models/factory.py`), and the
@@ -745,6 +751,120 @@ independently callable loss — it is **not** wired into `Trainer` (whose
 training loop, and no training (real or synthetic) has been run against
 it. That combined-objective wiring (classification + CS-SupCon + EDL) is
 a later task.
+
+### EDL: Evidential Deep Learning uncertainty (Task 9)
+
+**Why.** An ordinary softmax classifier always outputs a confident
+probability distribution, even when the input is genuinely ambiguous —
+there is no distinction between "the model is sure it's Glaucoma" and
+"the model has seen too little evidence to know." That distinction
+matters most for exactly the clinically confusable cases this project
+already targets with CS-SupCon (Healthy/Glaucoma, Disc Edema/Glaucoma,
+Diabetic Retinopathy/CSC): an uncertainty-aware model can flag those
+ambiguous cases for clinician review rather than silently guessing.
+Evidential Deep Learning (EDL) gives the model a second, explicit output —
+"how much evidence do I actually have?" — alongside its ordinary
+prediction, by treating the classifier's output as parameters of a
+Dirichlet distribution over class probabilities rather than a single
+point estimate.
+
+**Formulation.** Implemented in `src/losses/evidential.py`, following
+Sensoy, Kaplan, and Kandemir (2018), *"Evidential Deep Learning to
+Quantify Classification Uncertainty"* (NeurIPS) — one of several
+published EDL formulations, not claimed to be the only or universally
+optimal choice. For `K = 10` classes, given the evidential head's raw
+output `o` (shape `[B, K]`):
+
+```text
+evidence_k = softplus(o_k)          >= 0
+alpha_k    = evidence_k + 1         >= 1     (Dirichlet concentration parameters)
+S          = sum_k alpha_k                    (total Dirichlet "strength")
+p_k        = alpha_k / S                      (expected class probability under Dir(alpha))
+u          = K / S                            (uncertainty / "vacuity")
+```
+
+Because `evidence_k >= 0` always, `alpha_k >= 1` and `S >= K` always —
+which means `u = K/S` is always in `(0, 1]` and `p` always sums to
+exactly 1, for *any* finite raw output. `u -> 1` (maximum uncertainty) as
+evidence for every class vanishes; `u -> 0` as evidence for some class
+grows large. No division-by-zero, `log(0)`, or digamma-near-0 case is
+reachable from a finite input.
+
+**Loss.** The Bayes risk of the ordinary cross-entropy loss under the
+predicted Dirichlet — i.e. its expectation over `p ~ Dir(alpha)` — which
+has the closed form (`psi` = digamma, the derivative of log-Gamma):
+
+```text
+L_i^CE = sum_k y_ik * (psi(S_i) - psi(alpha_ik))
+```
+
+plus an annealed KL-divergence term that shrinks evidence for **incorrect**
+classes toward the uniform, evidence-free Dirichlet `Dir(1,...,1)`
+(the correct class's evidence is never penalized):
+
+```text
+alpha_tilde_i = y_i + (1 - y_i) * alpha_i        # correct class reset to 1
+KL_i          = KL[Dir(alpha_tilde_i) || Dir(1,...,1)]
+loss_i        = L_i^CE + lambda_t * KL_i
+```
+
+`lambda_t = kl_weight_max * min(1, epoch / kl_annealing_epochs)` is
+annealed linearly so the regularizer does not dominate before the model
+has had a chance to accumulate correct-class evidence early in training;
+the caller passes the current epoch, since `edl_loss`/`EDLLoss` track no
+training state themselves. Every `alpha_tilde` value is always `>= 1`
+(either exactly 1, or a copy of an `alpha` value that is itself `>= 1`),
+so both the `lgamma` and `digamma` terms in the closed-form KL are always
+evaluated on well-behaved (`>= 1`) inputs — no epsilon guarding is
+mathematically required, though `configs/losses.yaml: edl.epsilon`
+defensively floors the strength `S` before any division, consistent with
+this project's other losses.
+
+**Model integration.** `src/models/aa_evidentnet.py: AAEvidentNet` attaches
+an `EvidentialHead` (a **separate** `Linear(embedding_dim, num_classes)`)
+onto the same fused embedding the ordinary classifier already uses — the
+existing classifier and its `logits` output are completely unchanged and
+unaffected; `AAEvidentNetOutput` (only populated when
+`return_features=True`, so the plain `model(images)` path the Trainer
+uses for its forward/backward step is unaffected) now additionally
+exposes `evidential_raw`, `evidence`, `dirichlet_alpha` (the Dirichlet
+`alpha`, distinct from the pre-existing fusion-gate `alpha`),
+`probabilities`, and `uncertainty`.
+
+**PROVISIONAL hyperparameters — not yet tuned** (`configs/losses.yaml:
+edl`): `loss_weight: 1.0` (reserved for the future combined objective),
+`kl_annealing_epochs: 10`, `kl_weight_max: 1.0`, `epsilon: 1e-8`. None of
+these values have been experimentally tuned for this dataset or
+architecture — Task 9 implements the methodology only, and makes no
+performance or reliability claim about any choice of these values.
+
+**Configuration validation.** `load_edl_settings` fails clearly
+(`EvidentialConfigError`) on a non-positive `kl_annealing_epochs`/
+`epsilon`, or a negative `loss_weight`/`kl_weight_max` — never a silent
+default or best-effort correction. `edl_loss`/`EDLLoss` separately
+validate their tensor inputs (`ValueError` for out-of-range labels,
+malformed shapes, or an `alpha` below 1).
+
+**Eventual combination with classification + CS-SupCon.** The intended
+future training objective (not implemented yet) is:
+
+```text
+total_loss = classification_loss
+           + cs_supcon_weight * cs_supcon_loss
+           + edl_weight * edl_loss
+```
+
+Each of the three terms already exists as a standalone, independently
+tested module (`nn.CrossEntropyLoss`, `CSSupConLoss`, `EDLLoss`); wiring
+them together into one combined objective and a training loop that uses
+it is a later task, not this one.
+
+**Scope.** EDL (the evidential head and the loss) is implemented and
+unit-tested; it is **not** wired into `Trainer` or any training loop, and
+no training (real or synthetic) has been run against it — only
+architecture construction, forward-pass shape/finiteness checks, gradient
+propagation, and the qualitative evidence-vs-uncertainty relationship
+have been verified, all with `pretrained=False` and synthetic tensors.
 
 ### Original images vs. augmented training samples vs. clinical observations
 

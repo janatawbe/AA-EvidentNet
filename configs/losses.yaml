@@ -1,8 +1,11 @@
 # Loss function configuration.
 #
-# NOTE: No loss functions are implemented yet. Names and weights below are
-# PROVISIONAL placeholders reserving the schema, not scientifically
-# justified hyperparameters.
+# `baseline` (cross_entropy) is a schema placeholder, not yet consumed by
+# any code. `cs_supcon` (Task 8) and `edl` (Task 9) are implemented in
+# src/losses/cs_supcon.py and src/losses/evidential.py respectively, but
+# NEITHER is yet wired into a combined training objective or the training
+# loop -- see README.md for the intended eventual combination
+# (classification + CS-SupCon + EDL).
 
 seed: 42
 
@@ -10,14 +13,6 @@ baseline:
   name: cross_entropy
   label_smoothing: 0.0
   class_weighting: none  # one of: none, inverse_frequency, effective_number
-
-proposed:
-  # PROVISIONAL: evidential deep learning loss (e.g. Dirichlet-based) is
-  # planned but not yet implemented or tuned.
-  name: evidential
-  kl_annealing_epochs: 10
-  kl_weight_max: 1.0
-  regularizer_weight: 1.0
 
 # ---------------------------------------------------------------------------
 # CS-SupCon: Class-Similarity Supervised Contrastive Loss (Task 8).
@@ -50,3 +45,35 @@ cs_supcon:
     - ["Healthy", "Glaucoma"]
     - ["Disc Edema", "Glaucoma"]
     - ["Diabetic Retinopathy", "Central Serous Chorioretinopathy"]
+
+# ---------------------------------------------------------------------------
+# EDL: Evidential Deep Learning (Task 9).
+#
+# Implemented in src/losses/evidential.py. Dirichlet-based evidential
+# classification (Sensoy, Kaplan, Kandemir, 2018, "Evidential Deep
+# Learning to Quantify Classification Uncertainty", NeurIPS) - ONE of
+# several published EDL formulations, not claimed to be universally
+# optimal.
+#
+# Pipeline: evidence = softplus(raw_output) >= 0; alpha = evidence + 1
+# (>= 1, Dirichlet parameters); S = sum(alpha); probabilities = alpha / S;
+# uncertainty = num_classes / S (always in (0, 1]).
+#
+# Loss = Bayes risk of cross-entropy under Dir(alpha)
+#            sum_k y_k * (digamma(S) - digamma(alpha_k))
+#      + lambda_t * KL[Dir(y + (1-y)*alpha) || Dir(1,...,1)]
+#   where lambda_t = kl_weight_max * min(1, epoch / kl_annealing_epochs)
+#   is linearly annealed so the KL regularizer (which shrinks evidence for
+#   INCORRECT classes) does not dominate the loss before the model has
+#   had a chance to accumulate correct-class evidence early in training.
+#
+# PROVISIONAL: none of the values below have been experimentally tuned for
+# this dataset/architecture - this task (9) implements the methodology
+# only. No training has been performed with EDL.
+# ---------------------------------------------------------------------------
+edl:
+  enabled: true
+  loss_weight: 1.0
+  kl_annealing_epochs: 10
+  kl_weight_max: 1.0
+  epsilon: 1.0e-8

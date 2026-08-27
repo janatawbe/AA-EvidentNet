@@ -157,10 +157,24 @@ intent, not necessarily what was actually installed at run time.
   for AA-EvidentNet.** Only architecture construction, forward-pass
   correctness (shapes, finiteness, fusion arithmetic), and infrastructure
   compatibility have been verified, all with `pretrained=False` and
-  synthetic tensors. The CS-SupCon and EDL training objectives do not
-  exist yet, so there is nothing to train against beyond plain
+  synthetic tensors. CS-SupCon (Task 8) and EDL (Task 9) both exist as
+  standalone losses now, but neither is wired into a combined training
+  objective, so there is nothing to train against beyond plain
   cross-entropy (used only in the `Trainer`-compatibility test, not as a
   declared training methodology for this model).
+- **Since Task 9**, `AAEvidentNet` also attaches an `EvidentialHead`
+  (`src/losses/evidential.py`) — a separate `Linear(embedding_dim,
+  num_classes)` on the same fused embedding, entirely independent of the
+  pre-existing classifier/`logits`. Verified real parameter count
+  (`pretrained=False`, default config): **30,814,557** total (was
+  30,811,987 before Task 9; the 2,570-parameter difference is exactly the
+  new `Linear(256, 10)` evidential head). `AAEvidentNetOutput`'s new
+  fields (`evidential_raw`, `evidence`, `dirichlet_alpha`, `probabilities`,
+  `uncertainty`) are populated only when `return_features=True`, so the
+  plain `model(images)` path the `Trainer` uses for its forward/backward
+  step is unaffected — re-verified after this change:
+  `test_aa_evidentnet_trains_via_existing_trainer_without_modification`
+  and the checkpoint round-trip test both still pass unmodified.
 
 ## CS-SupCon reproducibility (Task 8)
 
@@ -205,6 +219,64 @@ intent, not necessarily what was actually installed at run time.
   is a later task. `temperature=0.1`, `ambiguity_weight=2.0`, and
   `loss_weight=1.0` in `configs/losses.yaml` are PROVISIONAL and have not
   been experimentally tuned.
+
+## EDL reproducibility (Task 9)
+
+- `src/losses/evidential.py` implements the Dirichlet-based Evidential
+  Deep Learning formulation of Sensoy, Kaplan, and Kandemir (2018) — one
+  of several published EDL formulations, not claimed to be universally
+  optimal. Pipeline: `evidence = softplus(raw_output)` (>= 0), `alpha =
+  evidence + 1` (>= 1, Dirichlet parameters), `S = sum(alpha)`,
+  `probabilities = alpha / S`, `uncertainty = num_classes / S` (always in
+  `(0, 1]`). Because `alpha >= 1` always, every `lgamma`/`digamma`
+  evaluation in the loss (both the direct term and the KL regularizer) is
+  guaranteed to operate on inputs `>= 1`, where both functions are smooth
+  and well-behaved — this is a property of the construction, not a
+  defensive epsilon patch.
+- Entirely config-driven (`configs/losses.yaml: edl` — `enabled`,
+  `loss_weight`, `kl_annealing_epochs`, `kl_weight_max`, `epsilon`); no
+  hyperparameter is hard-coded in the loss implementation.
+  `load_edl_settings` validates strictly and fails with
+  `EvidentialConfigError` (never a silent default or best-effort
+  correction) on a non-positive `kl_annealing_epochs`/`epsilon`, or a
+  negative `loss_weight`/`kl_weight_max`. `edl_loss`/`EDLLoss` separately
+  validate their tensor inputs (`ValueError` for out-of-range labels,
+  a batch-size mismatch, a malformed `alpha` shape, or an `alpha` value
+  below 1).
+- The evidential head (`EvidentialHead`, a `Linear(embedding_dim,
+  num_classes)`) is attached to `AAEvidentNet` on the same fused embedding
+  the existing classifier uses, but is a **separate** layer — the ordinary
+  `logits` output is bit-for-bit unaffected (verified directly:
+  `test_ordinary_logits_unaffected_by_evidential_head`), and the
+  evidential outputs are populated only when `return_features=True`.
+- **67/67 new tests pass** (`tests/test_evidential.py`), covering: head
+  construction and output shapes, evidence non-negativity, `alpha =
+  evidence + 1`, probabilities summing to 1, uncertainty shape/finiteness/
+  valid range (`(0, 1]` for `K=10`), the qualitative more-evidence-means-
+  less-uncertainty relationship (including near-zero and very large
+  evidence), extreme raw-output values (`+-1e6`) remaining finite,
+  arbitrary and degenerate batches (batch size 1, single-class-label
+  batches, up to 33 samples), loss scalar/finiteness/differentiability
+  (including through an upstream `nn.Linear`), the loss penalizing
+  confident-but-incorrect evidence more than confident-and-correct
+  evidence, the KL term penalizing unjustified wrong-class evidence,
+  annealing behavior (loss changes with epoch until `kl_annealing_epochs`,
+  then plateaus), determinism, and config/input validation failures. 14
+  further integration tests were added to `tests/test_aa_evidentnet.py`
+  covering the evidential head as attached to the full model (shapes,
+  non-negativity, `alpha=evidence+1`, probabilities-sum-to-1,
+  uncertainty range, no NaN/Inf, gradient propagation through the whole
+  model, state_dict round-trip, and that ordinary logits are unaffected).
+  All tests use tiny synthetic tensors — no real dataset, `data/raw/`, or
+  `test_original.csv` access anywhere in either test module.
+- **No training has been performed with EDL** — it is implemented and
+  unit-tested as a standalone loss operating on `(alpha, labels)` tensors
+  only, and the evidential head is verified only via forward-pass/gradient
+  checks. It is not wired into `Trainer` or any training loop; that
+  combined-objective integration (classification + CS-SupCon + EDL) is a
+  later task. `kl_annealing_epochs=10`, `kl_weight_max=1.0`,
+  `loss_weight=1.0`, and `epsilon=1e-8` in `configs/losses.yaml` are
+  PROVISIONAL and have not been experimentally tuned.
 
 ## Configuration hashing
 

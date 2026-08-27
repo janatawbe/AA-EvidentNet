@@ -1,7 +1,9 @@
-"""Tests for src.models.aa_evidentnet.AAEvidentNet (Task 7: architecture
-only - no CS-SupCon/EDL training objective). All tests use pretrained=False
-and tiny/synthetic tensors - no internet access or pretrained-weight
-download required."""
+"""Tests for src.models.aa_evidentnet.AAEvidentNet (Task 7: architecture;
+Task 9: evidential/Dirichlet uncertainty head integration - CS-SupCon/EDL
+LOSSES themselves are tested separately in test_cs_supcon.py/
+test_evidential.py, not here). All tests use pretrained=False and
+tiny/synthetic tensors - no internet access or pretrained-weight download
+required."""
 
 import copy
 
@@ -444,3 +446,138 @@ def test_aa_evidentnet_checkpoint_via_existing_checkpointing_module(tmp_path):
     state = restore_training_state(loaded, fresh_model, fresh_optimizer)
     assert state["epoch"] == 0
     assert state["best_metric"] == 0.1
+
+
+# --- evidential/Dirichlet uncertainty head integration (Task 9) ---
+
+
+def test_return_features_exposes_evidential_outputs():
+    model = _make_model()
+    model.eval()
+    x = torch.randn(4, 3, 224, 224)
+    with torch.no_grad():
+        output = model(x, return_features=True)
+    assert output.evidence is not None
+    assert output.dirichlet_alpha is not None
+    assert output.probabilities is not None
+    assert output.uncertainty is not None
+    assert output.evidential_raw is not None
+
+
+def test_evidential_output_shapes():
+    model = _make_model(num_classes=10)
+    model.eval()
+    x = torch.randn(5, 3, 224, 224)
+    with torch.no_grad():
+        output = model(x, return_features=True)
+    assert output.logits.shape == (5, 10)
+    assert output.embedding.shape == (5, 256)
+    assert output.evidential_raw.shape == (5, 10)
+    assert output.evidence.shape == (5, 10)
+    assert output.dirichlet_alpha.shape == (5, 10)
+    assert output.probabilities.shape == (5, 10)
+    assert output.uncertainty.shape == (5,)
+
+
+def test_evidential_head_uses_a_separate_linear_layer_from_the_classifier():
+    model = _make_model()
+    assert model.evidential_head.linear is not model.classifier
+    assert not torch.equal(model.evidential_head.linear.weight, model.classifier.weight)
+
+
+def test_ordinary_logits_unaffected_by_evidential_head():
+    # The plain model(images) path (used by the existing Trainer) must
+    # return exactly the same logits with or without the evidential head
+    # having ever been invoked.
+    model = _make_model()
+    model.eval()
+    x = torch.randn(3, 3, 224, 224)
+    with torch.no_grad():
+        logits_only = model(x)
+        output = model(x, return_features=True)
+    assert torch.equal(logits_only, output.logits)
+
+
+def test_evidence_is_non_negative():
+    model = _make_model()
+    model.eval()
+    x = torch.randn(4, 3, 224, 224)
+    with torch.no_grad():
+        output = model(x, return_features=True)
+    assert bool((output.evidence >= 0).all())
+
+
+def test_dirichlet_alpha_is_evidence_plus_one():
+    model = _make_model()
+    model.eval()
+    x = torch.randn(4, 3, 224, 224)
+    with torch.no_grad():
+        output = model(x, return_features=True)
+    assert torch.allclose(output.dirichlet_alpha, output.evidence + 1.0)
+
+
+def test_probabilities_sum_to_one():
+    model = _make_model()
+    model.eval()
+    x = torch.randn(6, 3, 224, 224)
+    with torch.no_grad():
+        output = model(x, return_features=True)
+    sums = output.probabilities.sum(dim=1)
+    assert torch.allclose(sums, torch.ones(6), atol=1e-5)
+
+
+def test_uncertainty_is_finite_and_in_valid_range():
+    model = _make_model(num_classes=10)
+    model.eval()
+    x = torch.randn(6, 3, 224, 224)
+    with torch.no_grad():
+        output = model(x, return_features=True)
+    assert torch.isfinite(output.uncertainty).all()
+    assert bool((output.uncertainty > 0).all())
+    assert bool((output.uncertainty <= 1.0).all())
+
+
+def test_no_nan_or_inf_in_evidential_outputs():
+    model = _make_model()
+    model.eval()
+    x = torch.randn(4, 3, 224, 224)
+    with torch.no_grad():
+        output = model(x, return_features=True)
+    for tensor in (output.evidential_raw, output.evidence, output.dirichlet_alpha, output.probabilities, output.uncertainty):
+        assert not torch.isnan(tensor).any()
+        assert not torch.isinf(tensor).any()
+
+
+def test_evidential_head_is_included_in_model_parameters():
+    model = _make_model()
+    param_names = [name for name, _ in model.named_parameters()]
+    assert any("evidential_head" in name for name in param_names)
+
+
+def test_evidential_head_gradients_propagate_through_full_model():
+    model = AAEvidentNet(pretrained=False, num_classes=10, embedding_dim=32, local_feature_dim=16)
+    x = torch.randn(3, 3, 224, 224)
+    output = model(x, return_features=True)
+    loss = output.uncertainty.sum() + output.evidence.sum()
+    loss.backward()
+    assert model.evidential_head.linear.weight.grad is not None
+    assert torch.isfinite(model.evidential_head.linear.weight.grad).all()
+
+
+def test_state_dict_round_trip_includes_evidential_head(tmp_path):
+    model = _make_model()
+    model.eval()
+    x = torch.randn(2, 3, 224, 224)
+    with torch.no_grad():
+        expected = model(x, return_features=True)
+
+    path = tmp_path / "aa_evidentnet_edl.pt"
+    torch.save(model.state_dict(), path)
+
+    fresh_model = _make_model()
+    fresh_model.load_state_dict(torch.load(path, weights_only=True))
+    fresh_model.eval()
+    with torch.no_grad():
+        actual = fresh_model(x, return_features=True)
+    assert torch.allclose(expected.uncertainty, actual.uncertainty, atol=1e-6)
+    assert torch.allclose(expected.dirichlet_alpha, actual.dirichlet_alpha, atol=1e-6)

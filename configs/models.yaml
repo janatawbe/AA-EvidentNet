@@ -51,9 +51,12 @@ baselines:
 
 # ---------------------------------------------------------------------------
 # AA-EvidentNet (proposed model) - ARCHITECTURE implemented in Task 7
-# (src/models/aa_evidentnet.py). CS-SupCon and EDL training objectives,
-# ablations, and full training are NOT implemented yet (later tasks) -
-# this config only drives the forward architecture:
+# (src/models/aa_evidentnet.py); evidential (Dirichlet) uncertainty head
+# added in Task 9. CS-SupCon (Task 8, src/losses/cs_supcon.py) and EDL
+# (Task 9, src/losses/evidential.py) are both implemented as standalone
+# losses, but NEITHER is wired into a combined training objective yet, and
+# no ablations or full training have been run - this config only drives
+# the forward architecture:
 #
 #   global branch: `global_backbone` (a timm model, pooled features)
 #       -> Linear projection -> embedding_dim
@@ -62,6 +65,11 @@ baselines:
 #   adaptive fusion: fused = alpha*global + (1-alpha)*local, where
 #       alpha = sigmoid(a single learnable scalar), always in (0, 1)
 #   classification head: Linear(embedding_dim, num_classes) on `fused`
+#   evidential head (Task 9): a SEPARATE Linear(embedding_dim, num_classes)
+#       on `fused` -> softplus -> evidence -> alpha=evidence+1 -> Dirichlet
+#       probabilities/uncertainty (src/losses/evidential.py: EvidentialHead).
+#       Always attached (not config-gated); does not affect the ordinary
+#       classification head/logits in any way.
 #
 # `embedding_dim` (default 256, per the project's research design) is the
 # shared representation space both branches project into - NOT the same
@@ -78,8 +86,12 @@ proposed:
     embedding_dim: 256       # shared embedding dimension (global/local projected + fused)
     local_feature_dim: 128   # raw local-branch output width, before projection to embedding_dim
     dropout: 0.0
-    # Reserved for a later task - not read by src/models/aa_evidentnet.py yet.
+    # uncertainty_head: the evidential head (Task 9) is always attached by
+    # src/models/aa_evidentnet.py; this key is descriptive, not yet read
+    # as a switch between alternative uncertainty mechanisms.
     uncertainty_head: evidential
+    # Reserved for a possible future MC-dropout-based alternative/addition
+    # to the evidential head - not read by any code yet.
     mc_samples: 20
 
 registry:
