@@ -127,6 +127,41 @@ intent, not necessarily what was actually installed at run time.
   registered as a sanity check, not a result). No baseline accuracy,
   F1, or other performance number exists anywhere in this repository.
 
+## AA-EvidentNet architecture reproducibility (Task 7)
+
+- `src/models/aa_evidentnet.py: AAEvidentNet` is entirely config-driven
+  (`configs/models.yaml: proposed.aa_evidentnet` — `global_backbone`,
+  `embedding_dim`, `local_feature_dim`, `pretrained`, `dropout`,
+  `num_classes`); no architecture constant is duplicated in source. The
+  global branch's native feature width is always read from the
+  instantiated backbone (`global_backbone.num_features`), never assumed.
+- `create_model("aa_evidentnet", config)` goes through the exact same
+  factory as the three baselines (`src/models/factory.py`); unit tests use
+  `pretrained=False` exclusively, so they never require internet access or
+  a weight download (same policy as `model_check` and the baseline smoke
+  tests).
+- The adaptive-fusion gate (`alpha = sigmoid(a single nn.Parameter)`) is a
+  real trainable parameter — included in `state_dict()`, and verified to
+  actually change value when the model is trained for even one tiny
+  synthetic epoch through the unmodified `Trainer`. Given the same random
+  seed, two freshly-constructed models produce numerically identical
+  outputs (`torch.manual_seed` before construction), consistent with every
+  other model in this project.
+- **Verified compatible, unmodified, with all Task 6 infrastructure**:
+  `Trainer.fit()` (forward/backward/optimizer step/validation), and
+  `build_checkpoint`/`save_checkpoint`/`load_checkpoint`/
+  `assert_checkpoint_compatible`/`restore_training_state` (checkpoint
+  round-trip) — no special-casing for AA-EvidentNet was needed anywhere in
+  `src/training/`.
+- **No training run — smoke, sanity-check, or real — has been performed
+  for AA-EvidentNet.** Only architecture construction, forward-pass
+  correctness (shapes, finiteness, fusion arithmetic), and infrastructure
+  compatibility have been verified, all with `pretrained=False` and
+  synthetic tensors. The CS-SupCon and EDL training objectives do not
+  exist yet, so there is nothing to train against beyond plain
+  cross-entropy (used only in the `Trainer`-compatibility test, not as a
+  declared training methodology for this model).
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.

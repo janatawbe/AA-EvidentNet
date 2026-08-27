@@ -35,18 +35,23 @@ about what the answers are.
   full training run completed)**: ResNet50, EfficientNetB0, and MaxViT
   (`maxvit_tiny_tf_224`), each with a standard softmax / cross-entropy
   head. See "Baseline models" and "Training engine" below.
-- **Proposed (AA-EvidentNet, not yet implemented)**: same or comparable
-  backbone, with an evidential (Dirichlet-based) uncertainty head trained
-  with an evidential loss, evaluated with Monte Carlo sampling for
-  uncertainty estimates.
+- **Proposed (AA-EvidentNet, architecture implemented; training objective
+  not yet implemented)**: a MaxViT global branch + a lightweight
+  convolutional local branch, fused via a learnable sigmoid-gated `alpha`
+  into a shared 256-d embedding, with a linear classification head. The
+  evidential (Dirichlet-based) uncertainty head and its training loss, and
+  the CS-SupCon supervised-contrastive objective, are **not yet
+  implemented** — see "AA-EvidentNet: the proposed model" below.
 
 Exact architecture details, hyperparameters, and loss formulations for the
-proposed model are **provisional** (see `configs/`) and will be finalized
-based on baseline experiments, not fixed in advance. **No model has
-completed training and no performance/accuracy numbers exist anywhere in
-this repository** — the CPU-only development environment made a full
-baseline training run impractical (see "The real baseline run" below);
-only smoke tests and a capped real-data sanity check have been run.
+proposed model's future training objective are **provisional** (see
+`configs/`) and will be finalized based on baseline experiments, not fixed
+in advance. **No model — baseline or proposed — has completed training,
+and no performance/accuracy number exists anywhere in this repository** —
+the CPU-only development environment made a full baseline training run
+impractical (see "The real baseline run" below); only smoke tests, a
+capped real-data sanity check, and (for AA-EvidentNet) architecture/
+forward-pass verification have been run.
 
 ## Dataset assumptions
 
@@ -586,6 +591,84 @@ repository.** That requires the target CUDA (RTX 3050 6GB) environment
 and is left for whenever that hardware is available — this task
 deliberately stops at "the engine works, end to end, on real data."
 
+## AA-EvidentNet: the proposed model (architecture only — Task 7)
+
+**Ambiguity-Aware Global-Local Representation Learning with Evidential
+Uncertainty for Reliable Multi-Class Ophthalmic Classification.** Only the
+forward architecture is implemented so far
+(`src/models/aa_evidentnet.py`) — the CS-SupCon (supervised contrastive)
+and EDL (evidential deep learning) training objectives, the uncertainty
+head, ablations, and any training run are explicitly **not yet
+implemented** (later tasks). `configs/models.yaml: proposed.aa_evidentnet.uncertainty_head`/
+`mc_samples` are reserved placeholders, not read by the current code.
+
+```text
+                    ┌─── global branch ───┐
+ images ──────────▶ │ MaxViT backbone      │──▶ raw_global [B, backbone.num_features]
+      │             │ (num_classes=0,      │        │
+      │             │  pooled features)    │        ▼ Linear projection
+      │             └──────────────────────┘   global_feature [B, embedding_dim]
+      │                                              │
+      │             ┌─── local branch ────┐          │   alpha = sigmoid(learnable scalar)
+      └───────────▶ │ 4x (Conv-BN-ReLU,   │──▶ raw_local [B, local_feature_dim]     │
+                    │  stride 2) + GAP     │        │                              ▼
+                    └──────────────────────┘        ▼ Linear projection    fused = alpha*global
+                                              local_feature [B, embedding_dim]  + (1-alpha)*local
+                                                                                     │
+                                                                                     ▼
+                                                                   logits = Linear(embedding_dim, 10)(fused)
+```
+
+- **Global branch**: any timm classification model (default
+  `maxvit_tiny_tf_224`, matching the MaxViT baseline), instantiated with
+  `num_classes=0` so a plain forward pass returns pooled backbone features
+  directly — no separate `forward_features`/`forward_head` dance needed,
+  since AA-EvidentNet supplies its own classifier on the fused embedding.
+  Its native feature width is always read from the instantiated backbone
+  (`global_backbone.num_features`), never hard-coded.
+- **Local branch** (`LocalBranch`): a deliberately lightweight 4-block
+  Conv→BatchNorm→ReLU stack (stride 2 each) + global average pooling —
+  well under 500K parameters (vs. the global backbone's ~30M), keeping it
+  "computationally reasonable and modular" as specified. Works at any
+  input resolution, including tiny synthetic test images.
+- **Shared embedding**: both branches project (via a plain `Linear` layer
+  each) into a common `embedding_dim`-wide space — **default 256**,
+  configurable in `configs/models.yaml: proposed.aa_evidentnet.embedding_dim`.
+- **Adaptive fusion**: `alpha = sigmoid(a single learnable scalar
+  parameter)`, always strictly in `(0, 1)` regardless of how far the raw
+  parameter drifts during training — interpretable and numerically stable
+  by construction. `fused = alpha * global_feature + (1 - alpha) *
+  local_feature`. `alpha` initializes at exactly 0.5 (equal initial trust
+  in both branches) and is a real trainable parameter — verified to
+  actually update via backprop through the existing `Trainer`, unmodified.
+- **Classification head**: a single `Linear(embedding_dim, num_classes)`
+  on the fused embedding, producing `[B, 10]` logits.
+- **Exposed representations**, all available via
+  `model(images, return_features=True)` → `AAEvidentNetOutput` (a
+  dataclass extending `src.models.base.ModelOutput`, so any code written
+  against the baseline `logits`/`features` interface still works
+  unchanged): `logits`, `features`/`embedding` (the fused representation,
+  identical), `global_feature`, `local_feature`, and `alpha` — exactly the
+  set later tasks (CS-SupCon, EDL, Grad-CAM, uncertainty) will need,
+  without those objectives being implemented yet.
+
+**Verified real parameter count** (`pretrained=False`, default config):
+**30,811,987** total — ~30.4M from the MaxViT-tiny global backbone (>90%
+of the total, as expected for a "lightweight" local branch) plus the
+local branch, two projection layers, and the classifier.
+
+`create_model("aa_evidentnet", config)` works through the exact same
+factory used by the three baselines (`src/models/factory.py`), and the
+model is a fully compatible drop-in for the existing `Trainer` and
+checkpointing infrastructure (`src/training/`) — verified directly:
+a real forward/backward/optimizer-step epoch (tiny synthetic data) changes
+every parameter including `alpha`, and `build_checkpoint`/`save_checkpoint`/
+`load_checkpoint`/`restore_training_state` all work unmodified. **No
+training run, real or otherwise, has been performed for AA-EvidentNet** —
+only architecture construction, forward-pass, and infrastructure
+compatibility have been verified, all with `pretrained=False` and
+synthetic tensors.
+
 ### Original images vs. augmented training samples vs. clinical observations
 
 **The balanced 20,000-sample training set does not represent 20,000
@@ -684,7 +767,7 @@ than doing nothing):
 | `prepare_dataset`   | Audit + eligibility + 70/20/10 original split + balanced (2,000/class) training set |
 | `model_check [--pretrained]` | Instantiate ResNet50/EfficientNetB0/MaxViT, run a synthetic forward pass, report shapes/params (never trains; offline unless `--pretrained`) |
 | `baseline --model {resnet50,efficientnetb0,maxvit} [--smoke-test] [--resume <ckpt>]` | Train a baseline via the reusable training engine (`src/training/`); trains on `train_balanced.csv`, validates on `val_original.csv`, never touches the test set |
-| `train --model aa_evidentnet` | Train the proposed model — **Task 7, not yet implemented**; fails clearly |
+| `train --model aa_evidentnet` | Train the proposed model — architecture exists (`create_model`), but **the training objective/loop is not yet wired up**; fails clearly |
 | `ablation`          | Ablation studies over proposed-model components     |
 | `hard_pairs`        | Confusable-class-pair analysis                      |
 | `calibration`       | Calibration + uncertainty quantification evaluation |

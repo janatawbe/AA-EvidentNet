@@ -50,19 +50,42 @@ baselines:
     embedding_dim: 512
 
 # ---------------------------------------------------------------------------
-# AA-EvidentNet (proposed model) - NOT YET IMPLEMENTED. Placeholder schema
-# only, reserved for a later task. Do not build against this section yet.
+# AA-EvidentNet (proposed model) - ARCHITECTURE implemented in Task 7
+# (src/models/aa_evidentnet.py). CS-SupCon and EDL training objectives,
+# ablations, and full training are NOT implemented yet (later tasks) -
+# this config only drives the forward architecture:
+#
+#   global branch: `global_backbone` (a timm model, pooled features)
+#       -> Linear projection -> embedding_dim
+#   local branch: a lightweight 4-block CNN (LocalBranch), raw width
+#       `local_feature_dim` -> Linear projection -> embedding_dim
+#   adaptive fusion: fused = alpha*global + (1-alpha)*local, where
+#       alpha = sigmoid(a single learnable scalar), always in (0, 1)
+#   classification head: Linear(embedding_dim, num_classes) on `fused`
+#
+# `embedding_dim` (default 256, per the project's research design) is the
+# shared representation space both branches project into - NOT the same
+# as global_backbone's own native feature width, which is read from the
+# instantiated backbone (`num_features`), never hard-coded.
 # ---------------------------------------------------------------------------
 proposed:
-  name: aa_evidentnet
-  backbone: maxvit_tiny_tf_224
-  pretrained: true
-  uncertainty_head: evidential
-  mc_samples: 20
+  aa_evidentnet:
+    name: aa_evidentnet
+    global_backbone: maxvit_tiny_tf_224   # timm model name for the global branch
+    pretrained: true
+    num_classes: 10
+    image_size: 224
+    embedding_dim: 256       # shared embedding dimension (global/local projected + fused)
+    local_feature_dim: 128   # raw local-branch output width, before projection to embedding_dim
+    dropout: 0.0
+    # Reserved for a later task - not read by src/models/aa_evidentnet.py yet.
+    uncertainty_head: evidential
+    mc_samples: 20
 
 registry:
-  # Maps CLI --model values / create_model() names to baselines.* entries
-  # above. Extend as new models are added.
+  # Maps CLI --model values / create_model() names to baselines.*/proposed.*
+  # entries above. Extend as new models are added.
   resnet50: baselines.resnet50
   efficientnetb0: baselines.efficientnetb0
   maxvit: baselines.maxvit
+  aa_evidentnet: proposed.aa_evidentnet

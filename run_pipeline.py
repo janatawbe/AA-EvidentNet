@@ -241,13 +241,16 @@ def run_train_command(args: argparse.Namespace) -> None:
     if args.model == "aa_evidentnet":
         raise PipelineNotImplementedError(
             "Command 'train --model aa_evidentnet' is recognized but not yet implemented.\n"
-            "AA-EvidentNet (the proposed model) is implemented in Task 7, not Task 6.\n"
-            "Task 6 only implements the reusable training engine and the three baselines "
-            "(use `python run_pipeline.py baseline --model {resnet50,efficientnetb0,maxvit}` instead)."
+            "AA-EvidentNet's architecture is implemented (src/models/aa_evidentnet.py, "
+            "constructible via create_model('aa_evidentnet', ...)), but its training "
+            "objective (CS-SupCon, evidential deep learning) and training loop are not "
+            "wired up yet - that is a later task.\n"
+            "Use `python run_pipeline.py baseline --model {resnet50,efficientnetb0,maxvit}` "
+            "for a baseline training run instead."
         )
     raise PipelineNotImplementedError(
         f"Command 'train --model {args.model}' is not recognized. "
-        "'train' is reserved for the proposed model (aa_evidentnet, Task 7). "
+        "'train' is reserved for the proposed model (aa_evidentnet). "
         "Use `python run_pipeline.py baseline --model <name>` for a baseline."
     )
 
