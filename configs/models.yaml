@@ -53,10 +53,13 @@ baselines:
 # AA-EvidentNet (proposed model) - ARCHITECTURE implemented in Task 7
 # (src/models/aa_evidentnet.py); evidential (Dirichlet) uncertainty head
 # added in Task 9. CS-SupCon (Task 8, src/losses/cs_supcon.py) and EDL
-# (Task 9, src/losses/evidential.py) are both implemented as standalone
-# losses, but NEITHER is wired into a combined training objective yet, and
-# no ablations or full training have been run - this config only drives
-# the forward architecture:
+# (Task 9, src/losses/evidential.py), plus the combined training objective
+# that wires them together with classification (Task 7 completion,
+# src/losses/combined.py; trained via
+# `python run_pipeline.py train --model aa_evidentnet`,
+# src/training/run_aa_evidentnet.py), are all implemented. No ablations or
+# full training run have been completed (a capped real-data sanity check
+# has - see README.md) - this config only drives the forward architecture:
 #
 #   global branch: `global_backbone` (a timm model, pooled features)
 #       -> Linear projection -> embedding_dim

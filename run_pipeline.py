@@ -1,9 +1,12 @@
 #!/usr/bin/env python
 """AA-EvidentNet pipeline CLI.
 
-This is the single entry point for the project's experiment pipeline. The
-`audit` command (raw dataset audit) is implemented; every other command is
-recognized by the CLI but not yet implemented, and fails with a clear
+This is the single entry point for the project's experiment pipeline.
+`audit`, `prepare_dataset`, `model_check`, `baseline`, and `train`
+(AA-EvidentNet, Task 7 completion) are implemented. Every other command
+(`ablation`, `hard_pairs`, `calibration`, `selective`, `gradcam`,
+`robustness`, `multi_seed`, `publication`, `final_test`) is recognized by
+the CLI but not yet implemented, and fails with a clear
 NotImplementedError-derived message rather than doing nothing silently.
 
 Usage:
@@ -38,9 +41,13 @@ from src.data.generate_balanced_dataset import (  # noqa: E402
     BalancedDatasetValidationError,
     run_generate_balanced_dataset,
 )
+from src.losses.combined import CombinedObjectiveConfigError  # noqa: E402
+from src.losses.cs_supcon import CSSupConConfigError  # noqa: E402
+from src.losses.evidential import EvidentialConfigError  # noqa: E402
 from src.models.model_check import ModelCheckError, run_model_check  # noqa: E402
 from src.models.factory import ModelConfigError  # noqa: E402
 from src.training.checkpointing import CheckpointIncompatibleError  # noqa: E402
+from src.training.run_aa_evidentnet import RunAAEvidentNetError, run_aa_evidentnet_training  # noqa: E402
 from src.training.run_baseline import RunBaselineError, run_baseline_training  # noqa: E402
 from src.training.trainer import TrainerError  # noqa: E402
 
@@ -238,20 +245,33 @@ def run_baseline_command(args: argparse.Namespace) -> None:
 
 
 def run_train_command(args: argparse.Namespace) -> None:
-    if args.model == "aa_evidentnet":
+    """python run_pipeline.py train --model aa_evidentnet.
+
+    Training always uses data/manifests/train_balanced.csv; validation
+    always uses data/manifests/val_original.csv; the test set is never
+    touched here (see src/training/run_aa_evidentnet.py). The training
+    objective is the combined classification + CS-SupCon + EDL loss
+    (src/losses/combined.py), driven by configs/losses.yaml.
+    """
+    if args.model != "aa_evidentnet":
         raise PipelineNotImplementedError(
-            "Command 'train --model aa_evidentnet' is recognized but not yet implemented.\n"
-            "AA-EvidentNet's architecture is implemented (src/models/aa_evidentnet.py, "
-            "constructible via create_model('aa_evidentnet', ...)), but its training "
-            "objective (CS-SupCon, evidential deep learning) and training loop are not "
-            "wired up yet - that is a later task.\n"
-            "Use `python run_pipeline.py baseline --model {resnet50,efficientnetb0,maxvit}` "
-            "for a baseline training run instead."
+            f"Command 'train --model {args.model}' is not recognized. "
+            "'train' is reserved for the proposed model (aa_evidentnet). "
+            "Use `python run_pipeline.py baseline --model <name>` for a baseline."
         )
-    raise PipelineNotImplementedError(
-        f"Command 'train --model {args.model}' is not recognized. "
-        "'train' is reserved for the proposed model (aa_evidentnet). "
-        "Use `python run_pipeline.py baseline --model <name>` for a baseline."
+    summary = run_aa_evidentnet_training(
+        models_config_path=args.config,
+        seed=args.seed,
+        device_override=None if args.device == "auto" else args.device,
+        batch_size_override=args.batch_size,
+        epochs_override=args.epochs,
+        num_workers_override=args.num_workers,
+        smoke_test=args.smoke_test,
+        resume_from=args.resume,
+    )
+    print(
+        f"[run_pipeline] run_id={summary.run_id} best_epoch={summary.fit_result.best_epoch} "
+        f"best_metric={summary.fit_result.best_metric} checkpoint={summary.best_checkpoint_path}"
     )
 
 
@@ -310,7 +330,15 @@ def main(argv=None) -> int:
     except ModelCheckError as e:
         print(f"[run_pipeline] MODEL CHECK FAILED: {e}", file=sys.stderr)
         return 1
-    except (RunBaselineError, ModelConfigError, CheckpointIncompatibleError) as e:
+    except (
+        RunBaselineError,
+        RunAAEvidentNetError,
+        ModelConfigError,
+        CheckpointIncompatibleError,
+        CombinedObjectiveConfigError,
+        CSSupConConfigError,
+        EvidentialConfigError,
+    ) as e:
         print(f"[run_pipeline] TRAINING SETUP ERROR: {e}", file=sys.stderr)
         return 1
     except TrainerError as e:

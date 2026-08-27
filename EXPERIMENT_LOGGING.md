@@ -114,6 +114,12 @@ intervals reported (`src/statistics`), not a single seed's number.
 Training-run logging and the experiment registry (above) are implemented
 and match this document exactly (updated in place after Task 6, per this
 document's own original instruction not to leave it aspirational once the
-real formats were known). `results/raw_predictions/` and the multi-seed/
-statistical-reporting sections below remain aspirational — they describe
-`src/evaluation`/`src/statistics`, neither of which exists yet.
+real formats were known). `src/training/run_aa_evidentnet.py` (Task 7
+completion) follows this exact same logging/registry policy — same
+`results/logs/<run_id>/` layout, same `experiments/registry.csv` schema,
+same `notes` convention for tagging smoke tests and sanity checks (e.g.
+`AA_EVIDENTNET_REAL_DATA_SANITY_CHECK_ONLY_...`) — nothing about this
+policy changed to accommodate the proposed model. `results/raw_predictions/`
+and the multi-seed/statistical-reporting sections below remain
+aspirational — they describe `src/evaluation`/`src/statistics`, neither
+of which exists yet.

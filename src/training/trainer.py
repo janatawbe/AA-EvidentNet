@@ -181,6 +181,7 @@ class Trainer:
         on_epoch_end: Optional[Callable[[EpochResult], None]] = None,
         start_epoch: int = 0,
         initial_best_metric: Optional[float] = None,
+        return_features: bool = False,
     ):
         self.model = model
         self.optimizer = optimizer
@@ -193,6 +194,15 @@ class Trainer:
         self.on_epoch_end = on_epoch_end
         self.start_epoch = start_epoch
         self.best_metric = initial_best_metric
+        # False (default, used by every baseline): model(images) -> logits,
+        # criterion(logits, labels) - unchanged from the original Task 6
+        # engine. True (AA-EvidentNet's combined objective, Task 7): calls
+        # model(images, return_features=True) instead, and passes the FULL
+        # output (logits/embedding/dirichlet_alpha) to criterion(output,
+        # labels), so a criterion like CombinedAAEvidentNetLoss can read
+        # more than just logits. `logits` for metrics/predictions is still
+        # read from `output.logits` either way.
+        self.return_features = return_features
 
         self.model.to(self.device)
 
@@ -203,8 +213,13 @@ class Trainer:
         images = batch["image"].to(self.device, non_blocking=True)
         labels = torch.as_tensor(batch["label"]).to(self.device, non_blocking=True)
         with torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled):
-            logits = self.model(images)
-            loss = self.criterion(logits, labels)
+            if self.return_features:
+                output = self.model(images, return_features=True)
+                logits = output.logits
+                loss = self.criterion(output, labels)
+            else:
+                logits = self.model(images)
+                loss = self.criterion(logits, labels)
         return logits, loss, labels, images.size(0)
 
     def train_one_epoch(self, max_steps: Optional[int] = None) -> Dict[str, float]:
@@ -256,6 +271,13 @@ class Trainer:
         epochs_without_improvement = 0
 
         for epoch in range(self.start_epoch, self.start_epoch + self.config.epochs):
+            # Optional hook for an epoch-dependent criterion (e.g.
+            # CombinedAAEvidentNetLoss's EDL KL-annealing coefficient).
+            # nn.CrossEntropyLoss and every other existing criterion has no
+            # such method, so this is a silent no-op for all baselines.
+            if hasattr(self.criterion, "set_epoch"):
+                self.criterion.set_epoch(epoch)
+
             start_time = time.time()
             train_metrics = self.train_one_epoch(max_steps=max_train_steps_per_epoch)
             val_metrics = self.validate_one_epoch(max_steps=max_val_steps_per_epoch)

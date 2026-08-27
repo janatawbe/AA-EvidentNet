@@ -121,19 +121,15 @@ def test_main_fails_clearly_for_unimplemented_commands(command, capsys):
     assert command in captured.err
 
 
-def test_main_fails_clearly_for_unimplemented_train_aa_evidentnet(capsys):
-    # "baseline" is implemented (see test_main_baseline_command_* below) and
-    # must NOT be exercised here without --smoke-test / a tmp fixture - a
-    # bare `baseline --model maxvit` would kick off a real, unbounded
-    # training run against the real dataset. AA-EvidentNet's ARCHITECTURE
-    # is implemented (Task 7, src/models/aa_evidentnet.py) but its
-    # training objective/loop is not - "train --model aa_evidentnet" must
-    # still fail clearly.
-    exit_code = run_pipeline.main(["train", "--model", "aa_evidentnet"])
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "NOT IMPLEMENTED" in captured.err
-    assert "training objective" in captured.err or "training loop" in captured.err
+def test_main_train_command_aa_evidentnet_smoke_test_passes():
+    # "train --model aa_evidentnet" is implemented (Task 7 completion:
+    # src/training/run_aa_evidentnet.py, the combined classification +
+    # CS-SupCon + EDL objective). Like "baseline", it is ONLY ever
+    # exercised here with --smoke-test, never bare, since a bare
+    # invocation would kick off a real, unbounded training run against
+    # the real dataset.
+    exit_code = run_pipeline.main(["train", "--model", "aa_evidentnet", "--smoke-test"])
+    assert exit_code == 0
 
 
 # --- "audit" is implemented: exercise it end-to-end against a tiny fixture

@@ -153,15 +153,13 @@ intent, not necessarily what was actually installed at run time.
   `assert_checkpoint_compatible`/`restore_training_state` (checkpoint
   round-trip) — no special-casing for AA-EvidentNet was needed anywhere in
   `src/training/`.
-- **No training run — smoke, sanity-check, or real — has been performed
-  for AA-EvidentNet.** Only architecture construction, forward-pass
-  correctness (shapes, finiteness, fusion arithmetic), and infrastructure
-  compatibility have been verified, all with `pretrained=False` and
-  synthetic tensors. CS-SupCon (Task 8) and EDL (Task 9) both exist as
-  standalone losses now, but neither is wired into a combined training
-  objective, so there is nothing to train against beyond plain
-  cross-entropy (used only in the `Trainer`-compatibility test, not as a
-  declared training methodology for this model).
+- **Since Task 7's completion**, a real-data (capped) sanity-check
+  training run has been performed for AA-EvidentNet through the combined
+  classification + CS-SupCon + EDL objective — see "AA-EvidentNet
+  training orchestration reproducibility (Task 7 completion)" below. No
+  full training run has been performed; only architecture construction,
+  forward-pass correctness, infrastructure compatibility, and this one
+  capped real-data run have been verified.
 - **Since Task 9**, `AAEvidentNet` also attaches an `EvidentialHead`
   (`src/losses/evidential.py`) — a separate `Linear(embedding_dim,
   num_classes)` on the same fused embedding, entirely independent of the
@@ -211,14 +209,13 @@ intent, not necessarily what was actually installed at run time.
   out-of-range labels, malformed embedding shapes). All tests use tiny
   synthetic tensors — no real dataset, `data/raw/`, or `test_original.csv`
   access anywhere in this test module.
-- **No training has been performed with CS-SupCon** — it is implemented
-  and unit-tested as a standalone loss operating on `(embeddings, labels)`
-  tensors only. It is not wired into `Trainer` (whose `criterion` currently
-  operates on `(logits, labels)`, not embeddings) or any training loop;
-  that combined-objective integration (classification + CS-SupCon + EDL)
-  is a later task. `temperature=0.1`, `ambiguity_weight=2.0`, and
-  `loss_weight=1.0` in `configs/losses.yaml` are PROVISIONAL and have not
-  been experimentally tuned.
+- **Since Task 7's completion**, CS-SupCon is also used (unmodified) as
+  one term of the combined AA-EvidentNet training objective
+  (`src/losses/combined.py`) and has been exercised on real data via a
+  capped sanity-check run — see "AA-EvidentNet training orchestration
+  reproducibility (Task 7 completion)" below. `temperature=0.1`,
+  `ambiguity_weight=2.0`, and `loss_weight=1.0` in `configs/losses.yaml`
+  remain PROVISIONAL and have not been experimentally tuned.
 
 ## EDL reproducibility (Task 9)
 
@@ -269,14 +266,95 @@ intent, not necessarily what was actually installed at run time.
   model, state_dict round-trip, and that ordinary logits are unaffected).
   All tests use tiny synthetic tensors — no real dataset, `data/raw/`, or
   `test_original.csv` access anywhere in either test module.
-- **No training has been performed with EDL** — it is implemented and
-  unit-tested as a standalone loss operating on `(alpha, labels)` tensors
-  only, and the evidential head is verified only via forward-pass/gradient
-  checks. It is not wired into `Trainer` or any training loop; that
-  combined-objective integration (classification + CS-SupCon + EDL) is a
-  later task. `kl_annealing_epochs=10`, `kl_weight_max=1.0`,
-  `loss_weight=1.0`, and `epsilon=1e-8` in `configs/losses.yaml` are
-  PROVISIONAL and have not been experimentally tuned.
+- **Since Task 7's completion**, EDL is also used (unmodified) as one term
+  of the combined AA-EvidentNet training objective
+  (`src/losses/combined.py`) and has been exercised on real data via a
+  capped sanity-check run — see below. `kl_annealing_epochs=10`,
+  `kl_weight_max=1.0`, `loss_weight=1.0`, and `epsilon=1e-8` in
+  `configs/losses.yaml` remain PROVISIONAL and have not been
+  experimentally tuned.
+
+## AA-EvidentNet training orchestration reproducibility (Task 7 completion)
+
+- **Combined objective** (`src/losses/combined.py:
+  CombinedAAEvidentNetLoss`): `L_total = L_classification +
+  cs_supcon_weight * L_CS-SupCon + edl_weight * L_EDL`, where
+  `cs_supcon_weight`/`edl_weight` are read directly from the pre-existing
+  `configs/losses.yaml: cs_supcon.loss_weight` / `edl.loss_weight` fields
+  (no new weight parameters were invented). `configs/losses.yaml:
+  baseline.label_smoothing` is now consumed by the classification term;
+  `baseline.class_weighting` values other than `none` raise
+  `CombinedObjectiveConfigError` rather than being silently ignored, since
+  that scheme is not implemented. Either loss term can be disabled
+  entirely via its own `enabled: false` (the module is not constructed and
+  the weight is forced to `0.0`, not merely left at a nonzero-but-unused
+  value).
+- **Trainer change**: `Trainer.__init__` gained one new optional
+  constructor argument, `return_features: bool = False`. When `True`
+  (used only by `run_aa_evidentnet_training`), each forward pass calls
+  `model(images, return_features=True)` and passes the *full* output to
+  `criterion(output, labels)` instead of `criterion(logits, labels)`;
+  `Trainer.fit()` additionally calls `criterion.set_epoch(epoch)` once per
+  epoch if the criterion defines that method (used for EDL's KL-annealing
+  coefficient). Every baseline (`return_features=False` by default, and
+  `nn.CrossEntropyLoss` has no `set_epoch`) is provably unaffected — the
+  full pre-existing `tests/test_trainer.py` (29 tests) and
+  `tests/test_run_baseline.py` (7 tests) suites still pass unmodified, and
+  5 new tests were added directly verifying the default/opt-in behavior.
+- **`src/training/run_aa_evidentnet.py: run_aa_evidentnet_training`**
+  mirrors `run_baseline.py` exactly (same `train_balanced.csv`/
+  `val_original.csv` manifests, same checkpointing/logging/registry/
+  resume/smoke-test conventions, same test-set lock — verified by a
+  dedicated regression test that no path under a completed run's
+  directories mentions `test_original`) but constructs
+  `create_model("aa_evidentnet", ...)` and the combined-objective
+  criterion instead. Wired into the CLI as `python run_pipeline.py train
+  --model aa_evidentnet` (`--smoke-test`/`--resume`/`--device`/
+  `--batch-size`/`--epochs`/`--num-workers` all supported identically to
+  `baseline`).
+- **43 new tests** covering this work: `tests/test_combined_loss.py` (27:
+  settings loading/validation, scalar/finite output, each term actually
+  contributing, weight/epoch sensitivity, gradients propagating through
+  all three components including into a real `AAEvidentNet`'s fusion gate
+  `alpha`, missing-field validation, determinism, ambiguity-pair
+  end-to-end effect), `tests/test_trainer.py` (+5: `return_features`
+  plumbing, full-output criterion, `set_epoch` hook), and
+  `tests/test_run_aa_evidentnet.py` (11: end-to-end smoke test, real
+  checkpoint/state-dict contents, per-term enable/disable ablation via
+  config, invalid-config handling, resume with a compatible/incompatible
+  checkpoint, failure-path registry updates, test-set lock).
+- **Real-data sanity check performed** (not a completed training run):
+  `run_id=20260827_152101_aa_evidentnet_seed42_c4f592`, seed 42, real
+  `train_balanced.csv` (20,000 rows, hash
+  `ae79e693a2b1ef0632f71f05c1ff927ad9d3059784057d9c1ecef529c1847002`) /
+  `val_original.csv` (880 rows), capped at 3 training + 3 validation
+  batches, 1 epoch, git commit `e5129b570cfbb76de24b1d1c6055d838ce471d80`,
+  config hash
+  `18bafee80830487bc0aff104085a7a0165f88707d1a31ebae84ab336e3159e88`. All
+  three loss components were finite and non-zero
+  (`classification=2.336, cs_supcon=3.048, edl=2.633, total=8.017`),
+  proving the combined objective genuinely backpropagates through the
+  real model on real images, not just in synthetic unit tests. Registered
+  in `experiments/registry.csv` with notes explicitly reading
+  `AA_EVIDENTNET_REAL_DATA_SANITY_CHECK_ONLY_...` so it is never mistaken
+  for a completed run. An earlier mis-configured attempt at this check
+  (`run_id=20260827_150813_aa_evidentnet_seed42_393841`, which omitted the
+  epoch cap and began running the full 50-epoch configured budget) was
+  manually stopped and its registry row corrected to `status=failed` with
+  an explanatory note, rather than deleted or left showing a stale
+  `running` status.
+- **No full AA-EvidentNet training run was attempted.** Extrapolating
+  from the sanity check (~95s wall-clock for 3 train + 3 validation
+  batches combined, CPU-only, `batch_size=16`, 4 physical cores,
+  `torch.cuda.is_available() == False`): a full epoch over
+  `train_balanced.csv` (1,250 batches) plus `val_original.csv` (55
+  batches) is on the order of several hours, against a 50-epoch
+  configured budget with early-stopping patience 10 — at least as
+  expensive as the baseline MaxViT case (`configs/training.yaml`), and
+  more so given AA-EvidentNet's additional local branch, evidential head,
+  and CS-SupCon/EDL loss computation every batch. No full run was started
+  in this CPU-only environment. **No AA-EvidentNet performance number
+  exists anywhere in this repository.**
 
 ## Configuration hashing
 
@@ -347,3 +425,10 @@ until that code is committed.
   augmentation) but full training-loop determinism on CUDA (where AMP
   actually activates) has not been tested, since this environment has no
   GPU.
+- The AA-EvidentNet training orchestration and combined objective (Task 7
+  completion) are verified end-to-end mechanically (unit tests + one
+  capped real-data sanity check), but no full AA-EvidentNet training run
+  has been performed, so neither its weight-trajectory reproducibility
+  nor any performance/calibration/uncertainty-quality claim can be made —
+  only "the combined objective backpropagates correctly through the real
+  model on real data" has been verified.

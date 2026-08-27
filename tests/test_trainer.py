@@ -348,3 +348,113 @@ def test_fit_result_tracks_best_metric_and_is_best_flag():
     result = trainer.fit()
     assert result.best_metric is not None
     assert result.history[0].is_best is True  # first epoch always "best" (no prior)
+
+
+# --- return_features / full-output criterion support (Task 7 completion:
+# AA-EvidentNet's combined objective needs more than logits) ---
+
+
+class _OutputStub:
+    def __init__(self, logits, embedding):
+        self.logits = logits
+        self.embedding = embedding
+
+
+class _TinyFeatureModel(nn.Module):
+    """A model exposing both call conventions, like AAEvidentNet:
+    model(images) -> logits; model(images, return_features=True) -> an
+    object with .logits/.embedding."""
+
+    def __init__(self, num_classes=10, embedding_dim=6):
+        super().__init__()
+        self.flatten = nn.Flatten()
+        self.embed = nn.Linear(3 * 8 * 8, embedding_dim)
+        self.classifier = nn.Linear(embedding_dim, num_classes)
+
+    def forward(self, images, return_features=False):
+        embedding = self.embed(self.flatten(images))
+        logits = self.classifier(embedding)
+        if not return_features:
+            return logits
+        return _OutputStub(logits=logits, embedding=embedding)
+
+
+class _EmbeddingAwareCriterion(nn.Module):
+    """A minimal stand-in for CombinedAAEvidentNetLoss: reads .logits AND
+    .embedding from the full model output, and exposes set_epoch()."""
+
+    def __init__(self):
+        super().__init__()
+        self.classification = nn.CrossEntropyLoss()
+        self.epochs_seen = []
+        self.received_embedding = None
+
+    def set_epoch(self, epoch):
+        self.epochs_seen.append(epoch)
+
+    def forward(self, output, labels):
+        self.received_embedding = output.embedding
+        # A trivial "embedding regularizer" term, just to prove the
+        # embedding (not only logits) genuinely participates in the loss.
+        return self.classification(output.logits, labels) + 0.0 * output.embedding.pow(2).mean()
+
+
+def _make_feature_trainer(train_n=16, val_n=8, batch_size=4, criterion=None, config_overrides=None):
+    train_loader = DataLoader(_DictDataset(train_n, seed=1), batch_size=batch_size, shuffle=True, drop_last=True)
+    val_loader = DataLoader(_DictDataset(val_n, seed=2), batch_size=batch_size, shuffle=False)
+    model = _TinyFeatureModel()
+    config = TrainingConfig(**{**dict(epochs=2, batch_size=batch_size, mixed_precision=False), **(config_overrides or {})})
+    optimizer = build_optimizer(model, config)
+    scheduler = build_scheduler(optimizer, config)
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        config=config,
+        device=torch.device("cpu"),
+        criterion=criterion,
+        return_features=True,
+    )
+    return trainer
+
+
+def test_return_features_false_by_default():
+    trainer = _make_trainer()
+    assert trainer.return_features is False
+
+
+def test_return_features_true_calls_model_with_return_features_and_full_output_criterion():
+    criterion = _EmbeddingAwareCriterion()
+    trainer = _make_feature_trainer(criterion=criterion)
+    metrics = trainer.train_one_epoch()
+    assert set(metrics.keys()) == {"loss", "accuracy", "macro_f1"}
+    assert criterion.received_embedding is not None
+    assert criterion.received_embedding.shape[1] == 6  # the stub model's embedding_dim
+
+
+def test_return_features_true_updates_all_model_weights_including_embedding_layer():
+    criterion = _EmbeddingAwareCriterion()
+    trainer = _make_feature_trainer(criterion=criterion)
+    before = copy.deepcopy(trainer.model.state_dict())
+    trainer.train_one_epoch()
+    after = trainer.model.state_dict()
+    changed = any(not torch.equal(before[k], after[k]) for k in before)
+    assert changed
+    assert not torch.equal(before["embed.weight"], after["embed.weight"])
+
+
+def test_fit_calls_criterion_set_epoch_once_per_epoch_when_present():
+    criterion = _EmbeddingAwareCriterion()
+    trainer = _make_feature_trainer(criterion=criterion, config_overrides={"epochs": 3, "early_stopping_enabled": False})
+    trainer.fit()
+    assert criterion.epochs_seen == [0, 1, 2]
+
+
+def test_fit_does_not_require_set_epoch_on_plain_criterion():
+    # nn.CrossEntropyLoss (the default criterion) has no set_epoch method -
+    # fit() must not error trying to call it.
+    trainer = _make_trainer(config_overrides={"epochs": 2})
+    result = trainer.fit()
+    assert len(result.history) == 2

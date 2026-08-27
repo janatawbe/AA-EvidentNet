@@ -1,18 +1,28 @@
 # Loss function configuration.
 #
-# `baseline` (cross_entropy) is a schema placeholder, not yet consumed by
-# any code. `cs_supcon` (Task 8) and `edl` (Task 9) are implemented in
-# src/losses/cs_supcon.py and src/losses/evidential.py respectively, but
-# NEITHER is yet wired into a combined training objective or the training
-# loop -- see README.md for the intended eventual combination
-# (classification + CS-SupCon + EDL).
+# `baseline` (cross_entropy): `label_smoothing` is consumed by the AA-EvidentNet
+# combined objective's classification term (src/losses/combined.py); baseline
+# model training (src/training/run_baseline.py) still uses plain
+# nn.CrossEntropyLoss() unmodified. `class_weighting` values other than
+# `none` are not implemented -- fail clearly rather than being ignored.
+# `cs_supcon` (Task 8) and `edl` (Task 9) are implemented in
+# src/losses/cs_supcon.py and src/losses/evidential.py respectively.
+# Since Task 7's completion, both are wired into the combined AA-EvidentNet
+# training objective (src/losses/combined.py: CombinedAAEvidentNetLoss,
+# used by src/training/run_aa_evidentnet.py) as:
+#
+#     L_total = L_classification + cs_supcon.loss_weight * L_CS-SupCon
+#                                 + edl.loss_weight * L_EDL
+#
+# -- see README.md ("AA-EvidentNet training orchestration and the combined
+# objective") for what has and hasn't actually been run with it.
 
 seed: 42
 
 baseline:
   name: cross_entropy
   label_smoothing: 0.0
-  class_weighting: none  # one of: none, inverse_frequency, effective_number
+  class_weighting: none  # only "none" is implemented; any other value fails clearly
 
 # ---------------------------------------------------------------------------
 # CS-SupCon: Class-Similarity Supervised Contrastive Loss (Task 8).

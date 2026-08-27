@@ -148,10 +148,19 @@ def write_min_training_config(tmp_path, overrides=None, config_name="training.ya
     return config_path
 
 
-def write_min_models_config(tmp_path, num_classes=10, config_name="models.yaml"):
+def write_min_models_config(
+    tmp_path, num_classes=10, config_name="models.yaml", include_aa_evidentnet=False, aa_evidentnet_overrides=None
+):
     """Minimal models.yaml with all three real baselines, pretrained=False
     (fast, offline). Uses the real timm architecture names since there is
-    no lightweight fake substitute for "a real create_model() call"."""
+    no lightweight fake substitute for "a real create_model() call".
+
+    `include_aa_evidentnet=True` additionally adds a `proposed.aa_evidentnet`
+    entry (pretrained=False, small embedding/local-feature dims by default
+    to keep tests fast) - only requested by tests that actually need it, so
+    the many existing baseline-only tests never pay for constructing the
+    (real, ~1-2s to build) MaxViT-backed global branch unnecessarily.
+    """
     config = {
         "seed": 42,
         "num_classes": num_classes,
@@ -172,6 +181,50 @@ def write_min_models_config(tmp_path, num_classes=10, config_name="models.yaml")
             },
         },
     }
+    if include_aa_evidentnet:
+        aa_evidentnet_config = {
+            "global_backbone": "maxvit_tiny_tf_224",
+            "pretrained": False,
+            "num_classes": num_classes,
+            "embedding_dim": 32,
+            "local_feature_dim": 16,
+            "dropout": 0.0,
+        }
+        aa_evidentnet_config.update(aa_evidentnet_overrides or {})
+        config["proposed"] = {"aa_evidentnet": aa_evidentnet_config}
+    config_path = tmp_path / config_name
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f)
+    return config_path
+
+
+def write_min_losses_config(tmp_path, class_names, overrides=None, config_name="losses.yaml"):
+    """Minimal losses.yaml for the combined AA-EvidentNet objective:
+    baseline (cross_entropy), cs_supcon, and edl sections, all enabled by
+    default with the real project defaults. `class_names` must match
+    whatever canonical classes the paired dataset/models config uses, so
+    cs_supcon.ambiguity_pairs (if any are added via `overrides`) resolve
+    correctly."""
+    config = {
+        "seed": 42,
+        "baseline": {"name": "cross_entropy", "label_smoothing": 0.0, "class_weighting": "none"},
+        "cs_supcon": {
+            "enabled": True,
+            "temperature": 0.1,
+            "loss_weight": 1.0,
+            "ambiguity_weight": 2.0,
+            "ambiguity_pairs": [],
+        },
+        "edl": {
+            "enabled": True,
+            "loss_weight": 1.0,
+            "kl_annealing_epochs": 10,
+            "kl_weight_max": 1.0,
+            "epsilon": 1.0e-8,
+        },
+    }
+    for section, section_overrides in (overrides or {}).items():
+        config[section] = {**config.get(section, {}), **section_overrides}
     config_path = tmp_path / config_name
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f)
