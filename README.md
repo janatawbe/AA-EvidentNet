@@ -31,9 +31,10 @@ about what the answers are.
 
 ## Planned architecture
 
-- **Baselines (implemented, not yet trained)**: ResNet50, EfficientNetB0,
-  and MaxViT (`maxvit_tiny_tf_224`), each with a standard softmax /
-  cross-entropy head. See "Baseline models" below.
+- **Baselines (implemented; training engine verified end to end, but no
+  full training run completed)**: ResNet50, EfficientNetB0, and MaxViT
+  (`maxvit_tiny_tf_224`), each with a standard softmax / cross-entropy
+  head. See "Baseline models" and "Training engine" below.
 - **Proposed (AA-EvidentNet, not yet implemented)**: same or comparable
   backbone, with an evidential (Dirichlet-based) uncertainty head trained
   with an evidential loss, evaluated with Monte Carlo sampling for
@@ -41,9 +42,11 @@ about what the answers are.
 
 Exact architecture details, hyperparameters, and loss formulations for the
 proposed model are **provisional** (see `configs/`) and will be finalized
-based on baseline experiments, not fixed in advance. No model has been
-trained and no performance has been measured or reported anywhere in this
-repository yet.
+based on baseline experiments, not fixed in advance. **No model has
+completed training and no performance/accuracy numbers exist anywhere in
+this repository** — the CPU-only development environment made a full
+baseline training run impractical (see "The real baseline run" below);
+only smoke tests and a capped real-data sanity check have been run.
 
 ## Dataset assumptions
 
@@ -474,6 +477,115 @@ check, never run by default `pytest`. Writes
 `results/tables/model_parameters.csv` from the actually-instantiated
 models (never hand-typed).
 
+## Training engine (`src/training/`)
+
+Implemented and used for a real (if brief) run; **no model has completed
+a full training budget yet** (see below). One reusable `Trainer`
+(`src/training/trainer.py`) is shared by every model — baselines now,
+AA-EvidentNet later — so training logic is never duplicated per
+architecture.
+
+- **Data usage is fixed, not configurable per run**: training always
+  reads `data/manifests/train_balanced.csv`; validation always reads
+  `data/manifests/val_original.csv`. **The training engine never loads
+  `test_original.csv` anywhere** — model selection (checkpointing, LR
+  scheduling, early stopping) is driven exclusively by validation
+  metrics. This is enforced by omission (the code path simply contains no
+  reference to the test manifest), not by a runtime check.
+- **Mixed precision** (`torch.amp`) is only ever actually enabled when
+  running on CUDA; requesting it on CPU is silently (but loggably, via
+  `Trainer.amp_enabled` and the run log) downgraded to disabled — it is
+  never falsely reported as active. Device selection: `auto` picks CUDA
+  if available else CPU with no error either way; an explicit `--device
+  cuda` fails clearly if CUDA isn't actually available.
+- **Gradient accumulation** (`gradient_accumulation_steps`) and
+  **gradient clipping** (`gradient_clip_norm`, `clip_grad_norm_`) are both
+  configurable in `configs/training.yaml`; accumulation correctly steps
+  the optimizer on the final (possibly partial) batch of an epoch even if
+  it doesn't complete a full accumulation window.
+- **Checkpointing**: `best.pt` is saved whenever `monitor_metric`
+  (default `val_macro_f1`) improves; `latest.pt` is saved every
+  `checkpoint_frequency` epochs. Every checkpoint bundles model/optimizer/
+  scheduler state together with metadata (model name, architecture,
+  num_classes, seed, epoch, best metric, the full training config,
+  the training dataset manifest's hash, and the git commit) — enough to
+  know exactly what produced it without consulting anything else.
+  Checkpoints for different runs are never overwritten (each run gets its
+  own `results/checkpoints/<run_id>/`).
+- **Resume** (`--resume <checkpoint.pt>`): restores model/optimizer/
+  scheduler/epoch/best-metric and continues training from the next epoch.
+  `assert_checkpoint_compatible()` rejects (raises
+  `CheckpointIncompatibleError`) a checkpoint whose `model_name` or
+  `num_classes` doesn't match the current run — never silently coerced.
+- **Early stopping** is validation-only (default: stop after 10 epochs of
+  no `val_macro_f1` improvement); the LR scheduler
+  (`ReduceLROnPlateau`, default factor 0.5 / patience 5) is likewise
+  validation-only. Both, plus "best checkpoint" selection, all key off the
+  *same* configured `monitor_metric`/`mode`.
+- **Per-run logging**: every run gets its own
+  `results/logs/<run_id>/` (never overwritten — `RunLogger` refuses to
+  reuse an existing directory) containing `run.log` (human-readable),
+  `metrics.jsonl` (one JSON record per epoch), `config.yaml` (the full
+  effective config), `environment.txt`, `dataset_hash.txt`, and
+  `git_commit.txt`. `run_id` format:
+  `YYYYMMDD_HHMMSS_<model>_seed<seed>[_smoke]_<6-hex>` — the trailing
+  random suffix guards against collisions from same-second runs, since
+  the timestamp alone is not guaranteed unique.
+- **Experiment registry** (`experiments/registry.csv`, committed to git —
+  unlike the heavy `results/logs`/`results/checkpoints`, this is a
+  lightweight ledger worth keeping): one row per run
+  (`experiment_id, model, seed, config, checkpoint, test_result, status,
+  notes`), registered automatically as `running` at start and updated to
+  `completed` or `failed` at the end. **`test_result` is always empty** —
+  it is only ever populated by a future, separate test-evaluation task.
+- **CPU-compatible smoke test**
+  (`python run_pipeline.py baseline --model maxvit --smoke-test`): builds
+  a tiny (8 train / 4 val image) fully synthetic dataset on the fly
+  (never touches `data/raw/` or the real manifests), forces
+  `pretrained=False` (offline, like `model_check`) and a small batch size
+  (4, so the loader is guaranteed at least one full batch) and 2 epochs
+  regardless of `configs/training.yaml`, then runs the complete real
+  pipeline — forward, loss, backward, optimizer step, validation,
+  checkpoint save, metrics/log write, registry registration — end to
+  end. Every smoke-test run_id/registry note is tagged `smoke` /
+  `smoke_test` so it can never be mistaken for a real result.
+
+### The real baseline run: what was and wasn't done
+
+This environment is **CPU-only** (`torch.cuda.is_available()` is
+`False`); no GPU was available to attempt full training on. Per this
+task's explicit instructions, a full 50-epoch MaxViT training run was
+**not** attempted on CPU — a timed check of 3 real batches (48 images)
+through MaxViT at 224×224 took ~75 seconds, meaning a full epoch over
+the real 20,000-sample `train_balanced.csv` (1,250 batches at
+`batch_size=16`) would take on the order of **8+ hours per epoch**,
+against a 50-epoch configured budget. Instead:
+
+1. The full smoke test above was run for all three baselines (see
+   `experiments/registry.csv`).
+2. A real-data loading/forward sanity check was performed directly
+   against `train_balanced.csv` (20,000 rows) and `val_original.csv`
+   (880 rows) — manifests load, class mapping is correct
+   (`{'Central Serous Chorioretinopathy': 0, ..., 'Retinitis
+   Pigmentosa': 9}`), a real batch is `[8, 3, 224, 224]` with valid
+   labels, MaxViT's forward pass produces `[8, 10]` logits with no
+   NaN/Inf, and the optimizer/scheduler both initialize correctly.
+3. One very short **real-data sanity-check run** (seed 42, MaxViT,
+   real `pretrained=True` ImageNet weights, real `train_balanced.csv`/
+   `val_original.csv`, capped at 3 batches for training and 3 for
+   validation, 1 epoch) was run end to end through the full orchestration
+   — registered in `experiments/registry.csv` with notes explicitly
+   reading `REAL_DATA_SANITY_CHECK_ONLY_not_a_completed_baseline...` —
+   to prove the entire real pipeline (data → model → optimizer →
+   checkpoint → logging → registry) works correctly on real data, without
+   claiming this constitutes a trained baseline.
+
+**A controlled, full-budget MaxViT baseline training run has NOT been
+performed and no baseline performance numbers exist anywhere in this
+repository.** That requires the target CUDA (RTX 3050 6GB) environment
+and is left for whenever that hardware is available — this task
+deliberately stops at "the engine works, end to end, on real data."
+
 ### Original images vs. augmented training samples vs. clinical observations
 
 **The balanced 20,000-sample training set does not represent 20,000
@@ -562,17 +674,17 @@ All pipeline stages run through a single entry point:
 python run_pipeline.py <command> [options]
 ```
 
-Commands (recognized now; `audit`, `prepare_dataset`, and `model_check`
-are implemented, the rest fail with a clear message rather than doing
-nothing):
+Commands (recognized now; `audit`, `prepare_dataset`, `model_check`, and
+`baseline` are implemented, the rest fail with a clear message rather
+than doing nothing):
 
 | Command            | Purpose                                             |
 |---------------------|------------------------------------------------------|
 | `audit`             | Dataset audit: counts, duplicates, corruption, leakage |
 | `prepare_dataset`   | Audit + eligibility + 70/20/10 original split + balanced (2,000/class) training set |
 | `model_check [--pretrained]` | Instantiate ResNet50/EfficientNetB0/MaxViT, run a synthetic forward pass, report shapes/params (never trains; offline unless `--pretrained`) |
-| `baseline --model maxvit` | Train/evaluate the baseline model             |
-| `train --model aa_evidentnet` | Train the proposed model                 |
+| `baseline --model {resnet50,efficientnetb0,maxvit} [--smoke-test] [--resume <ckpt>]` | Train a baseline via the reusable training engine (`src/training/`); trains on `train_balanced.csv`, validates on `val_original.csv`, never touches the test set |
+| `train --model aa_evidentnet` | Train the proposed model — **Task 7, not yet implemented**; fails clearly |
 | `ablation`          | Ablation studies over proposed-model components     |
 | `hard_pairs`        | Confusable-class-pair analysis                      |
 | `calibration`       | Calibration + uncertainty quantification evaluation |

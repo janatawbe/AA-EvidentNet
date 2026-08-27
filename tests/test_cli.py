@@ -121,12 +121,17 @@ def test_main_fails_clearly_for_unimplemented_commands(command, capsys):
     assert command in captured.err
 
 
-@pytest.mark.parametrize("command", MODEL_COMMANDS)
-def test_main_fails_clearly_for_unimplemented_model_commands(command, capsys):
-    exit_code = run_pipeline.main([command, "--model", "maxvit"])
+def test_main_fails_clearly_for_unimplemented_train_aa_evidentnet(capsys):
+    # "baseline" is implemented (see test_main_baseline_command_* below) and
+    # must NOT be exercised here without --smoke-test / a tmp fixture - a
+    # bare `baseline --model maxvit` would kick off a real, unbounded
+    # training run against the real dataset. Only "train --model
+    # aa_evidentnet" (Task 7, not yet implemented) is checked here.
+    exit_code = run_pipeline.main(["train", "--model", "aa_evidentnet"])
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "NOT IMPLEMENTED" in captured.err
+    assert "Task 7" in captured.err
 
 
 # --- "audit" is implemented: exercise it end-to-end against a tiny fixture
@@ -252,3 +257,31 @@ def test_main_model_check_command_default_is_offline_not_pretrained(tmp_path, ca
     assert exit_code == 0
     captured = capsys.readouterr()
     assert "pretrained=False" in captured.out
+
+
+# --- "baseline" is implemented: ONLY ever exercised here with
+# --smoke-test, never bare, since a bare invocation would kick off a real,
+# unbounded training run against the real dataset (dataset.yaml/training.yaml
+# paths are not overridable via --config for this command - --config only
+# points at models.yaml - so these tests unavoidably touch the real, but
+# gitignored, results/logs, results/checkpoints, and experiments/registry.csv). ---
+
+
+def test_main_baseline_command_smoke_test_passes():
+    exit_code = run_pipeline.main(["baseline", "--model", "resnet50", "--smoke-test"])
+    assert exit_code == 0
+
+
+def test_main_baseline_command_invalid_model_fails_clearly(capsys):
+    exit_code = run_pipeline.main(["baseline", "--model", "not_a_real_model", "--smoke-test"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "TRAINING SETUP ERROR" in captured.err
+
+
+def test_main_train_command_non_aa_evidentnet_model_fails_clearly(capsys):
+    exit_code = run_pipeline.main(["train", "--model", "resnet50"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "NOT IMPLEMENTED" in captured.err
+    assert "baseline" in captured.err

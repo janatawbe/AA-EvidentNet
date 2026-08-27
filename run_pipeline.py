@@ -39,6 +39,10 @@ from src.data.generate_balanced_dataset import (  # noqa: E402
     run_generate_balanced_dataset,
 )
 from src.models.model_check import ModelCheckError, run_model_check  # noqa: E402
+from src.models.factory import ModelConfigError  # noqa: E402
+from src.training.checkpointing import CheckpointIncompatibleError  # noqa: E402
+from src.training.run_baseline import RunBaselineError, run_baseline_training  # noqa: E402
+from src.training.trainer import TrainerError  # noqa: E402
 
 
 class PipelineNotImplementedError(NotImplementedError):
@@ -143,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Model name (see configs/models.yaml registry, "
                 "e.g. 'maxvit' or 'aa_evidentnet').",
             )
+            sub.add_argument(
+                "--resume",
+                type=str,
+                default=None,
+                help="Path to a checkpoint (.pt) to resume training from.",
+            )
         if name == "model_check":
             sub.add_argument(
                 "--pretrained",
@@ -203,6 +213,45 @@ def run_model_check_command(args: argparse.Namespace) -> None:
     run_model_check(config_path=args.config, check_pretrained=args.pretrained, output_csv=args.output_csv)
 
 
+def run_baseline_command(args: argparse.Namespace) -> None:
+    """python run_pipeline.py baseline --model {resnet50,efficientnetb0,maxvit}.
+
+    Training always uses data/manifests/train_balanced.csv; validation
+    always uses data/manifests/val_original.csv. The test set is never
+    touched here.
+    """
+    summary = run_baseline_training(
+        model_name=args.model,
+        models_config_path=args.config,
+        seed=args.seed,
+        device_override=None if args.device == "auto" else args.device,
+        batch_size_override=args.batch_size,
+        epochs_override=args.epochs,
+        num_workers_override=args.num_workers,
+        smoke_test=args.smoke_test,
+        resume_from=args.resume,
+    )
+    print(
+        f"[run_pipeline] run_id={summary.run_id} best_epoch={summary.fit_result.best_epoch} "
+        f"best_metric={summary.fit_result.best_metric} checkpoint={summary.best_checkpoint_path}"
+    )
+
+
+def run_train_command(args: argparse.Namespace) -> None:
+    if args.model == "aa_evidentnet":
+        raise PipelineNotImplementedError(
+            "Command 'train --model aa_evidentnet' is recognized but not yet implemented.\n"
+            "AA-EvidentNet (the proposed model) is implemented in Task 7, not Task 6.\n"
+            "Task 6 only implements the reusable training engine and the three baselines "
+            "(use `python run_pipeline.py baseline --model {resnet50,efficientnetb0,maxvit}` instead)."
+        )
+    raise PipelineNotImplementedError(
+        f"Command 'train --model {args.model}' is not recognized. "
+        "'train' is reserved for the proposed model (aa_evidentnet, Task 7). "
+        "Use `python run_pipeline.py baseline --model <name>` for a baseline."
+    )
+
+
 def dispatch(args: argparse.Namespace) -> None:
     command = args.command
 
@@ -210,8 +259,8 @@ def dispatch(args: argparse.Namespace) -> None:
         "audit": lambda: run_audit(args),
         "prepare_dataset": lambda: run_prepare_dataset(args),
         "model_check": lambda: run_model_check_command(args),
-        "baseline": lambda: not_implemented(command, "src/models + src/training (baseline models)"),
-        "train": lambda: not_implemented(command, "src/models + src/training (AA-EvidentNet)"),
+        "baseline": lambda: run_baseline_command(args),
+        "train": lambda: run_train_command(args),
         "ablation": lambda: not_implemented(command, "src/training (ablation runner)"),
         "hard_pairs": lambda: not_implemented(command, "src/evaluation (hard pairs analysis)"),
         "calibration": lambda: not_implemented(command, "src/evaluation (calibration/uncertainty)"),
@@ -257,6 +306,12 @@ def main(argv=None) -> int:
         return 1
     except ModelCheckError as e:
         print(f"[run_pipeline] MODEL CHECK FAILED: {e}", file=sys.stderr)
+        return 1
+    except (RunBaselineError, ModelConfigError, CheckpointIncompatibleError) as e:
+        print(f"[run_pipeline] TRAINING SETUP ERROR: {e}", file=sys.stderr)
+        return 1
+    except TrainerError as e:
+        print(f"[run_pipeline] TRAINER ERROR: {e}", file=sys.stderr)
         return 1
 
     return 0

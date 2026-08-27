@@ -14,34 +14,81 @@ loudly (see `run_pipeline.py`), not emit placeholder numbers.
 
 ## What every run must record
 
-Each invocation of a pipeline stage that produces results should write a
-run record containing, at minimum:
+**Implemented as of Task 6** for baseline training runs
+(`src/training/run_baseline.py` + `src/training/logging.py`). Every run
+writes, to its own `results/logs/<run_id>/`:
 
-- `command`: the CLI command and full argument list used
-- `config_path` and `config_hash` (`src/utils/config.hash_config`)
-- `seed` (one of 42, 123, 456, 789, 2026 for official runs)
-- `git_commit` and `git_status` (`src/utils/git_info`) — a "dirty" status
-  (uncommitted changes) should be flagged in the run record, not hidden
-- `environment_info` (`src/utils/env_info.collect_environment_info`)
-- `dataset_manifest_hash` (`src/utils/hashing.hash_manifest`) — so results
-  can be tied to the exact set of files/labels used
-- start/end timestamps
-- output artifact paths (checkpoints, logs, tables, figures)
+- `run.log` — human-readable, timestamped (UTC ISO8601) line per event
+  (run start, per-epoch summary, checkpoint saves, completion/failure)
+- `metrics.jsonl` — one JSON record per epoch: `epoch`, `train_loss`,
+  `train_accuracy`, `train_macro_f1`, `val_loss`, `val_accuracy`,
+  `val_balanced_accuracy`, `val_macro_f1`, `lr`, `elapsed_seconds`,
+  `is_best`
+- `config.yaml` — the full effective config (model name/architecture,
+  seed, device, smoke_test flag, the resolved training config, the
+  resolved model config)
+- `environment.txt` — `src/utils/env_info.collect_environment_info()`
+  output (Python/torch/torchvision/timm versions, CUDA availability, GPU
+  name if any, OS/platform)
+- `dataset_hash.txt` — SHA-256 of the manifest actually used for training
+  (`train_balanced.csv`; a fixed sentinel string for smoke tests, which
+  use synthetic data with no real manifest)
+- `git_commit.txt` — the commit this run executed at
+
+This directly reuses `src/utils/config.hash_config`, `src/utils/hashing.hash_file`,
+and `src/utils/git_info.get_git_commit` rather than reimplementing any of
+them.
 
 ## Directory conventions
 
-- `results/logs/<experiment>/<run_id>/` — training/eval logs, run record
-  (e.g. `run_record.json`), console output
-- `results/checkpoints/<experiment>/<run_id>/` — model weights
-- `results/raw_predictions/<experiment>/<run_id>/` — per-sample predictions,
-  logits/evidential parameters, uncertainty scores (needed for later
-  calibration/selective-prediction/statistics stages to recompute metrics
-  without re-running inference)
-- `results/tables/` — aggregated, human-readable tables (CSV/Markdown)
+- `results/logs/<run_id>/` — per-run logs, as listed above (flat, not
+  nested by experiment/stage name — `run_id` already encodes the model)
+- `results/checkpoints/<run_id>/` — `best.pt` (saved whenever
+  `monitor_metric` improves) and `latest.pt` (saved every
+  `checkpoint_frequency` epochs); each is a self-describing bundle of
+  model/optimizer/scheduler state + metadata (see REPRODUCIBILITY.md)
+- `results/raw_predictions/<experiment>/<run_id>/` — per-sample
+  predictions, logits/evidential parameters, uncertainty scores (a later
+  task; not produced by Task 6's training engine, which only trains/
+  validates, never predicts-and-dumps)
+- `results/tables/` — aggregated, human-readable tables (CSV/Markdown),
+  e.g. `model_parameters.csv`
 - `results/figures/` — generated plots
 
-`run_id` should be unique and traceable, e.g.
-`{experiment}_seed{seed}_{git_commit_short}_{utc_timestamp}`.
+Both `results/logs/*` and `results/checkpoints/*` are gitignored (regenerable,
+and too large/numerous to version) — `RunLogger` refuses to create a run
+directory that already exists, so no run's logs/checkpoints are ever
+silently overwritten by another.
+
+`run_id` format (`src/training/logging.generate_run_id`):
+`YYYYMMDD_HHMMSS_<model>_seed<seed>[_smoke]_<6-hex>` — e.g.
+`20260827_093914_maxvit_seed42_65f791`, or
+`20260827_092925_maxvit_seed42_smoke_a0ee86` for a smoke test. The
+trailing 6-hex random suffix (not just the timestamp) is what actually
+guarantees uniqueness for same-second runs.
+
+## Experiment registry (`experiments/registry.csv`)
+
+**Implemented as of Task 6** (`src/training/registry.py`). Unlike
+`results/logs`/`results/checkpoints`, this file IS committed to git — it
+is a small, human-readable ledger of every run, never the heavy
+artifacts themselves. Columns: `experiment_id, model, seed, config,
+checkpoint, test_result, status, notes`.
+
+- `register_run()` appends a new row with `status=running` at the start
+  of a run; duplicate `experiment_id`s are rejected (`RegistryError`).
+- `update_run()` rewrites that one row in place — to `status=completed`
+  (with the best checkpoint's path) on success, or `status=failed` (with
+  the exception message in `notes`) if training raises. Every other run's
+  row is left untouched.
+- `test_result` is **always empty** for a training run — it is only ever
+  populated by a future, separate test-evaluation task (`final_test`, not
+  yet implemented). A training run must never write to this column.
+- `notes` distinguishes run kinds: `smoke_test` for smoke-test runs, or a
+  free-text note (e.g. a sanity-check run is tagged something like
+  `REAL_DATA_SANITY_CHECK_ONLY_not_a_completed_baseline...`) so a reader
+  scanning the registry can never mistake a mechanical check for a real
+  result.
 
 ## Experiment directories (`experiments/`)
 
@@ -64,7 +111,9 @@ intervals reported (`src/statistics`), not a single seed's number.
 
 ## Status of this document
 
-This is a policy document written before any experiment has been run. It
-will need small revisions once `src/training` and `src/evaluation` exist and
-their actual output formats are known — update it in place rather than
-leaving it aspirational and wrong.
+Training-run logging and the experiment registry (above) are implemented
+and match this document exactly (updated in place after Task 6, per this
+document's own original instruction not to leave it aspirational once the
+real formats were known). `results/raw_predictions/` and the multi-seed/
+statistical-reporting sections below remain aspirational — they describe
+`src/evaluation`/`src/statistics`, neither of which exists yet.

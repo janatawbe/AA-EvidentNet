@@ -115,3 +115,64 @@ def write_min_dataset_config(
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f)
     return config_path
+
+
+def write_min_training_config(tmp_path, overrides=None, config_name="training.yaml"):
+    """Write a minimal, fast training.yaml for src.training tests -
+    results/logs and results/checkpoints both point under tmp_path so
+    tests never touch the real project's results/ or experiments/
+    directories."""
+    config = {
+        "seed": 42,
+        "device": "cpu",
+        "smoke_test": False,
+        "batch_size": 4,
+        "epochs": 2,
+        "num_workers": 0,
+        "optimizer": {"name": "adamw", "lr": 3.0e-4, "weight_decay": 1.0e-4, "betas": [0.9, 0.999], "eps": 1.0e-8},
+        "scheduler": {"name": "reduce_on_plateau", "factor": 0.5, "patience": 5, "min_lr": 1.0e-6},
+        "early_stopping": {"enabled": True, "patience": 10},
+        "monitor_metric": "val_macro_f1",
+        "mode": "max",
+        "gradient_clip_norm": 1.0,
+        "gradient_accumulation_steps": 1,
+        "mixed_precision": True,
+        "checkpoint_frequency": 1,
+        "checkpointing": {"save_dir": str(tmp_path / "checkpoints")},
+        "logging": {"log_dir": str(tmp_path / "logs")},
+    }
+    config.update(overrides or {})
+    config_path = tmp_path / config_name
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f)
+    return config_path
+
+
+def write_min_models_config(tmp_path, num_classes=10, config_name="models.yaml"):
+    """Minimal models.yaml with all three real baselines, pretrained=False
+    (fast, offline). Uses the real timm architecture names since there is
+    no lightweight fake substitute for "a real create_model() call"."""
+    config = {
+        "seed": 42,
+        "num_classes": num_classes,
+        "image_size": 224,
+        "baselines": {
+            "resnet50": {"architecture": "resnet50", "pretrained": False, "num_classes": num_classes, "dropout": 0.0},
+            "efficientnetb0": {
+                "architecture": "efficientnet_b0",
+                "pretrained": False,
+                "num_classes": num_classes,
+                "dropout": 0.0,
+            },
+            "maxvit": {
+                "architecture": "maxvit_tiny_tf_224",
+                "pretrained": False,
+                "num_classes": num_classes,
+                "dropout": 0.0,
+            },
+        },
+    }
+    config_path = tmp_path / config_name
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f)
+    return config_path

@@ -78,13 +78,54 @@ intent, not necessarily what was actually installed at run time.
   installed `timm==1.0.28` (`timm.list_models(..., pretrained=True)`)
   rather than assumed to exist.
 - `--pretrained` on `model_check` additionally downloads real
-  ImageNet-pretrained weights — this is the one place in this project
-  that requires internet access, and it is never invoked by the default
-  `pytest` suite or by `prepare_dataset`.
-- No model has been trained yet, so weight-initialization and
-  training-loop reproducibility are not yet applicable — only
-  architecture instantiation and the forward-pass interface are verified
-  at this stage.
+  ImageNet-pretrained weights — one of only two places in this project
+  that require internet access (the other being a real, non-smoke-test
+  `baseline` run, since `configs/models.yaml` defaults to
+  `pretrained: true`); neither is ever invoked by the default `pytest`
+  suite or by `prepare_dataset`.
+
+## Training reproducibility (Task 6)
+
+- `src/training/trainer.py: Trainer` is the one training engine every
+  model uses; nothing architecture-specific lives there. Every
+  hyperparameter (`configs/training.yaml`) is config-driven — optimizer
+  (AdamW: `lr`, `weight_decay`, `betas`, `eps`), scheduler
+  (`ReduceLROnPlateau`: `factor`, `patience`, `min_lr`), early stopping
+  (`patience`), `gradient_clip_norm`, `gradient_accumulation_steps`,
+  `mixed_precision`, `checkpoint_frequency`, and `monitor_metric`/`mode`
+  (used identically for early stopping, LR scheduling, AND "best"
+  checkpoint selection — always validation-only, never test).
+- **Every checkpoint is self-describing**: model/optimizer/scheduler
+  state plus metadata (`model_name`, `architecture`, `num_classes`,
+  `seed`, `epoch`, `best_metric`, the full training config, the
+  *training* dataset manifest's SHA-256, and the git commit) — see
+  `src/training/checkpointing.py: build_checkpoint`. `assert_checkpoint_compatible()`
+  raises `CheckpointIncompatibleError` (never silently coerces) if a
+  resume target's `model_name`/`num_classes` don't match.
+- **Every run gets its own directory** —
+  `results/logs/<run_id>/` and `results/checkpoints/<run_id>/` — and
+  `RunLogger` refuses to reuse an existing `run_id` directory, so no run's
+  logs/checkpoints can ever silently overwrite another's.
+  `run_id = YYYYMMDD_HHMMSS_<model>_seed<seed>[_smoke]_<6-hex>`; the
+  trailing random suffix (not just the timestamp) is what actually
+  guarantees uniqueness under same-second collisions.
+- `experiments/registry.csv` (committed to git, unlike `results/logs`/
+  `results/checkpoints`) is the append-only ledger of every run — status
+  `running` → `completed`/`failed`, `test_result` always empty until a
+  future, separate test-evaluation task populates it.
+- AMP (`torch.amp`) is only ever actually active on CUDA — requesting it
+  on CPU is downgraded to disabled and logged as such (`Trainer.amp_enabled`),
+  never falsely reported as active. Reproducibility of the numeric
+  training trajectory itself (not just the mechanics) has not been
+  empirically verified end-to-end on CUDA, since this development
+  environment has none.
+- **No baseline has completed a full training run** in this environment
+  (CPU-only) — see README.md "The real baseline run" for exactly what was
+  and wasn't done (a full smoke test for all three baselines, a real-data
+  loading/forward sanity check, and one real-data training run capped at
+  3 batches/epoch to prove the pipeline works, explicitly logged and
+  registered as a sanity check, not a result). No baseline accuracy,
+  F1, or other performance number exists anywhere in this repository.
 
 ## Configuration hashing
 
@@ -144,8 +185,14 @@ until that code is committed.
   are built on an eligibility state where 464 cross-class duplicate groups
   remain UNRESOLVED (see README.md) — both will change as those get
   human-reviewed, so treat them as provisional, not final.
-- No model or training loop exists yet, so weight initialization and
-  training dynamics reproducibility is not yet applicable.
-- CPU-only determinism has been configured defensively but not empirically
-  verified end-to-end, since there is no training loop yet to test it
-  against.
+- The training engine and checkpoint/logging/registry mechanics are
+  verified end-to-end (smoke tests + a capped real-data sanity check),
+  but no baseline has completed a full training run, so weight-trajectory
+  reproducibility (does training produce the same result run-to-run on
+  real data, over real epochs) has not been empirically verified — only
+  mechanics have.
+- CPU-only determinism has been configured defensively (deterministic
+  runtime preprocessing, seeded dataloader shuffling, seeded per-sample
+  augmentation) but full training-loop determinism on CUDA (where AMP
+  actually activates) has not been tested, since this environment has no
+  GPU.

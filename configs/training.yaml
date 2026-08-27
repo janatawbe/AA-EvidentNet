@@ -1,13 +1,24 @@
 # Training configuration.
 #
-# NOTE: These are PROVISIONAL defaults for scaffolding the CLI and config
-# loading only. No training loop exists yet; values are not tuned.
+# NOTE: These are INITIAL/PROVISIONAL training defaults for Task 6's
+# training engine + a single controlled baseline run. They are NOT tuned
+# and must never be presented as optimal. Any change driven by an
+# observed result must be documented as an explicit, separate tuning
+# experiment (see EXPERIMENT_LOGGING.md) - never silently applied after
+# seeing a result.
+#
+# Training data usage is fixed by src/training/run_baseline.py, not by
+# this file: training always reads data/manifests/train_balanced.csv,
+# validation always reads data/manifests/val_original.csv. The test set
+# (test_original.csv) is never read anywhere in the training engine -
+# model selection (checkpointing, early stopping, LR scheduling) uses
+# validation metrics only.
 
 seed: 42
-device: auto  # one of: auto, cpu, cuda
+device: auto  # one of: auto, cpu, cuda - auto detects CUDA and falls back to CPU; explicit "cuda" fails clearly if unavailable
 smoke_test: false
 
-batch_size: 16
+batch_size: 16          # target: RTX 3050 6GB at image_size=224
 epochs: 50
 num_workers: 4
 
@@ -15,22 +26,35 @@ optimizer:
   name: adamw
   lr: 3.0e-4
   weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
 
 scheduler:
-  name: cosine
-  warmup_epochs: 5
+  name: reduce_on_plateau
+  factor: 0.5             # LR multiplied by this on plateau
+  patience: 5              # epochs of no improvement before reducing LR
+  min_lr: 1.0e-6
 
 early_stopping:
   enabled: true
-  patience: 10
-  monitor: val_loss
+  patience: 10             # epochs of no improvement before stopping (independent of scheduler patience)
 
-mc_samples: 20  # Monte Carlo forward passes for uncertainty estimation.
+# monitor_metric / mode drive early stopping, LR scheduling, AND "best"
+# checkpoint selection - all validation-only, never test.
+monitor_metric: val_macro_f1
+mode: max
+
+gradient_clip_norm: 1.0            # set to null to disable clipping
+gradient_accumulation_steps: 1     # effective_batch_size = batch_size * this
+
+mixed_precision: true    # only actually active when running on CUDA; auto (and silently) disabled on CPU, never falsely reported as enabled
+
+checkpoint_frequency: 1  # save a "latest" checkpoint every N epochs, in addition to "best" (saved whenever monitor_metric improves)
+
+mc_samples: 20  # Monte Carlo forward passes for uncertainty estimation (a later task, not Task 6).
 
 checkpointing:
   save_dir: results/checkpoints
-  save_best_only: true
 
 logging:
   log_dir: results/logs
-  log_every_n_steps: 10
