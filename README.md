@@ -35,13 +35,16 @@ about what the answers are.
   full training run completed)**: ResNet50, EfficientNetB0, and MaxViT
   (`maxvit_tiny_tf_224`), each with a standard softmax / cross-entropy
   head. See "Baseline models" and "Training engine" below.
-- **Proposed (AA-EvidentNet, architecture implemented; training objective
-  not yet implemented)**: a MaxViT global branch + a lightweight
-  convolutional local branch, fused via a learnable sigmoid-gated `alpha`
-  into a shared 256-d embedding, with a linear classification head. The
-  evidential (Dirichlet-based) uncertainty head and its training loss, and
-  the CS-SupCon supervised-contrastive objective, are **not yet
-  implemented** — see "AA-EvidentNet: the proposed model" below.
+- **Proposed (AA-EvidentNet, architecture implemented; CS-SupCon loss
+  implemented; combined training objective not yet wired up)**: a MaxViT
+  global branch + a lightweight convolutional local branch, fused via a
+  learnable sigmoid-gated `alpha` into a shared 256-d embedding, with a
+  linear classification head. The CS-SupCon supervised-contrastive loss
+  (`src/losses/cs_supcon.py`) is implemented as a standalone, unit-tested
+  module. The evidential (Dirichlet-based) uncertainty head and its
+  training loss, and the training loop that combines classification +
+  CS-SupCon + EDL, are **not yet implemented** — see "AA-EvidentNet: the
+  proposed model" below.
 
 Exact architecture details, hyperparameters, and loss formulations for the
 proposed model's future training objective are **provisional** (see
@@ -591,14 +594,15 @@ repository.** That requires the target CUDA (RTX 3050 6GB) environment
 and is left for whenever that hardware is available — this task
 deliberately stops at "the engine works, end to end, on real data."
 
-## AA-EvidentNet: the proposed model (architecture only — Task 7)
+## AA-EvidentNet: the proposed model (architecture — Task 7; CS-SupCon loss — Task 8)
 
 **Ambiguity-Aware Global-Local Representation Learning with Evidential
-Uncertainty for Reliable Multi-Class Ophthalmic Classification.** Only the
-forward architecture is implemented so far
-(`src/models/aa_evidentnet.py`) — the CS-SupCon (supervised contrastive)
-and EDL (evidential deep learning) training objectives, the uncertainty
-head, ablations, and any training run are explicitly **not yet
+Uncertainty for Reliable Multi-Class Ophthalmic Classification.** The
+forward architecture (`src/models/aa_evidentnet.py`, Task 7) and the
+CS-SupCon supervised-contrastive loss (`src/losses/cs_supcon.py`, Task 8)
+are implemented. The EDL (evidential deep learning) training objective,
+the uncertainty head, the combined training loop wiring these losses
+together, ablations, and any training run are explicitly **not yet
 implemented** (later tasks). `configs/models.yaml: proposed.aa_evidentnet.uncertainty_head`/
 `mc_samples` are reserved placeholders, not read by the current code.
 
@@ -668,6 +672,79 @@ training run, real or otherwise, has been performed for AA-EvidentNet** —
 only architecture construction, forward-pass, and infrastructure
 compatibility have been verified, all with `pretrained=False` and
 synthetic tensors.
+
+### CS-SupCon: Class-Similarity Supervised Contrastive Loss (Task 8)
+
+**Why.** Ordinary supervised contrastive learning (SupCon; Khosla et al.,
+2020) pulls same-class embeddings together and pushes every other class
+apart equally — it has no notion that some incorrect classes are far more
+clinically confusable than others. This project cares specifically about
+ophthalmic class pairs a clinician could plausibly mix up, so CS-SupCon
+(`src/losses/cs_supcon.py`) extends SupCon by upweighting exactly those
+configured **ambiguous** negative pairs in the contrastive denominator,
+pushing the embedding space to separate them more aggressively than
+ordinary (unrelated) negatives.
+
+**The three configured ambiguity pairs** (`configs/losses.yaml:
+cs_supcon.ambiguity_pairs`, by canonical class name):
+
+1. Healthy ↔ Glaucoma
+2. Disc Edema ↔ Glaucoma
+3. Diabetic Retinopathy ↔ Central Serous Chorioretinopathy (CSC)
+
+These are listed by canonical class name and resolved to indices at
+construction time using the exact same alphabetical ordering as
+`src/data/dataset.py: build_class_to_idx` — there is no second, separately
+maintained class-to-index mapping anywhere in the loss code.
+
+**What it consumes/returns.** `CSSupConLoss` (an `nn.Module`) and the
+functional wrapper `cs_supcon_loss(...)` take `embeddings: [B, D]` (any
+embedding tensor — e.g. AA-EvidentNet's fused `embedding`/`features`, but
+the loss itself is architecture-agnostic and does not import the model)
+and `labels: [B]` (integer class ids), and return a single scalar loss
+tensor. Embeddings are L2-normalized internally, so callers may pass
+raw or pre-normalized embeddings. An optional `num_classes` argument
+enables strict label-range validation.
+
+**How the ambiguity weighting works, precisely.** For anchor `i` with
+L2-normalized embedding `z_i`, define `sim(i, a) = z_i . z_a /
+temperature` for every other sample `a` in the batch (self-comparisons
+are excluded from every sum). The denominator for anchor `i` is
+`D_i = sum_{a != i} w(i, a) * exp(sim(i, a))`, where the per-pair weight
+`w(i, a)` is `ambiguity_weight` if `a`'s label differs from `i`'s label
+**and** that class pair is one of the three configured ambiguous pairs,
+and `1.0` for every other pair (same-class positives, and unrelated
+negatives, are both left at the standard SupCon weight of `1.0`). The
+per-anchor loss is the usual SupCon log-probability of its true positives
+under this (now ambiguity-weighted) denominator, averaged only over
+anchors that have at least one same-class positive in the batch — an
+anchor with no positive in the batch (e.g. every label in the batch is
+unique) contributes nothing, rather than producing a `NaN`/`Inf` from
+dividing by zero. Numerical stability uses the standard log-sum-exp trick
+(subtracting each row's max similarity, detached, before exponentiating).
+
+**PROVISIONAL hyperparameters — not yet tuned** (`configs/losses.yaml:
+cs_supcon`): `temperature: 0.1` (the common default from the original
+SupCon paper), `ambiguity_weight: 2.0` (an illustrative "twice the weight
+of an ordinary negative" choice), `loss_weight: 1.0` (reserved for the
+future combined training objective). None of these values have been
+experimentally tuned for this dataset or architecture — Task 8
+implements the methodology only, and makes no performance claim about
+any choice of these values.
+
+**Configuration validation.** `resolve_ambiguity_pairs` /
+`load_cs_supcon_settings` fail clearly (`CSSupConConfigError`) on an
+unknown class name, a class paired with itself, a duplicate/conflicting
+pair (order-independent — `[A, B]` and `[B, A]` are the same pair), or a
+non-positive `temperature`/`ambiguity_weight`/negative `loss_weight` —
+never a silent default or best-effort correction.
+
+**Scope.** CS-SupCon is implemented and unit-tested as a standalone,
+independently callable loss — it is **not** wired into `Trainer` (whose
+`criterion` operates on `(logits, labels)`, not embeddings) or into any
+training loop, and no training (real or synthetic) has been run against
+it. That combined-objective wiring (classification + CS-SupCon + EDL) is
+a later task.
 
 ### Original images vs. augmented training samples vs. clinical observations
 

@@ -162,6 +162,50 @@ intent, not necessarily what was actually installed at run time.
   cross-entropy (used only in the `Trainer`-compatibility test, not as a
   declared training methodology for this model).
 
+## CS-SupCon reproducibility (Task 8)
+
+- `src/losses/cs_supcon.py: CSSupConLoss` is entirely config-driven
+  (`configs/losses.yaml: cs_supcon` — `enabled`, `temperature`,
+  `loss_weight`, `ambiguity_weight`, `ambiguity_pairs`); no ambiguity
+  relationship or hyperparameter is hard-coded in the loss implementation.
+  Ambiguity pairs are configured by canonical class NAME and resolved to
+  indices via the project's single canonical ordering
+  (`src/data/dataset.py: build_class_to_idx`, alphabetical sort of
+  `configs/dataset.yaml: class_names`) — there is no second, independently
+  maintained class-to-index mapping.
+- `resolve_ambiguity_pairs`/`load_cs_supcon_settings` validate strictly and
+  fail with `CSSupConConfigError` (never a silent default or best-effort
+  correction) on: an unknown class name, a class paired with itself, a
+  duplicate/conflicting pair (order-independent), or a non-positive
+  `temperature`/`ambiguity_weight`/negative `loss_weight`.
+- Numerical stability uses the standard log-sum-exp trick (per-row max
+  similarity subtracted, detached, before exponentiating); an anchor with
+  no same-class positive in its batch (e.g. a batch with one sample per
+  class) contributes a finite zero rather than `NaN`/`Inf` from an
+  empty-set division.
+- **46/46 new tests pass** (`tests/test_cs_supcon.py`), covering: scalar/
+  finite output, gradient propagation (including through an upstream
+  `nn.Linear`), same-class positive-pair recognition, self-pair exclusion
+  from the denominator, degenerate batches (no positive for an anchor,
+  single-class batch, batch size 1), arbitrary batch sizes, pre-normalized
+  vs. raw embeddings, extreme-scale numerical stability, ambiguity
+  weighting actually changing the loss (and leaving it unchanged when no
+  configured ambiguous class is present in the batch), temperature and
+  ambiguity-weight sensitivity, determinism across repeated/independent
+  calls, and config/input validation failures (invalid class names,
+  self-paired/duplicate ambiguity pairs, invalid temperature/weights,
+  out-of-range labels, malformed embedding shapes). All tests use tiny
+  synthetic tensors — no real dataset, `data/raw/`, or `test_original.csv`
+  access anywhere in this test module.
+- **No training has been performed with CS-SupCon** — it is implemented
+  and unit-tested as a standalone loss operating on `(embeddings, labels)`
+  tensors only. It is not wired into `Trainer` (whose `criterion` currently
+  operates on `(logits, labels)`, not embeddings) or any training loop;
+  that combined-objective integration (classification + CS-SupCon + EDL)
+  is a later task. `temperature=0.1`, `ambiguity_weight=2.0`, and
+  `loss_weight=1.0` in `configs/losses.yaml` are PROVISIONAL and have not
+  been experimentally tuned.
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.

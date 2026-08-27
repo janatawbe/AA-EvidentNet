@@ -18,3 +18,35 @@ proposed:
   kl_annealing_epochs: 10
   kl_weight_max: 1.0
   regularizer_weight: 1.0
+
+# ---------------------------------------------------------------------------
+# CS-SupCon: Class-Similarity Supervised Contrastive Loss (Task 8).
+#
+# Implemented in src/losses/cs_supcon.py. Extends standard supervised
+# contrastive learning (Khosla et al., 2020) with explicit awareness of
+# clinically ambiguous ophthalmic class pairs: ordinary SupCon treats every
+# incorrect class identically as a negative, but this project specifically
+# wants the model pushed harder to separate embeddings for pairs a
+# clinician could plausibly confuse. Ambiguity pairs are listed below by
+# canonical class name (must match configs/dataset.yaml: class_names
+# exactly) - they are resolved to indices via the same alphabetical
+# ordering src/data/dataset.py: build_class_to_idx uses, never a
+# separately hard-coded mapping.
+#
+# PROVISIONAL: `temperature`, `loss_weight`, and `ambiguity_weight` below
+# have NOT been experimentally tuned for this dataset/architecture.
+# temperature=0.1 is the common default from the original SupCon paper;
+# ambiguity_weight=2.0 is an illustrative "twice the weight of an ordinary
+# negative" choice. This task (8) implements the methodology only - no
+# performance claim is made about these values.
+# ---------------------------------------------------------------------------
+cs_supcon:
+  enabled: true
+  temperature: 0.1
+  loss_weight: 1.0
+  ambiguity_weight: 2.0
+  ambiguity_pairs:
+    # Clinically motivated ambiguous/hard class pairs (see README.md).
+    - ["Healthy", "Glaucoma"]
+    - ["Disc Edema", "Glaucoma"]
+    - ["Diabetic Retinopathy", "Central Serous Chorioretinopathy"]

@@ -8,3 +8,4 @@ experiment_id,model,seed,config,checkpoint,test_result,status,notes
 20260827_100704_resnet50_seed42_smoke_0d1a47,resnet50,42,configs/training.yaml,results\checkpoints\20260827_100704_resnet50_seed42_smoke_0d1a47\best.pt,,completed,smoke_test
 20260827_101146_resnet50_seed42_smoke_e5845f,resnet50,42,configs/training.yaml,results\checkpoints\20260827_101146_resnet50_seed42_smoke_e5845f\best.pt,,completed,smoke_test
 20260827_101325_resnet50_seed42_smoke_ac1013,resnet50,42,configs/training.yaml,results\checkpoints\20260827_101325_resnet50_seed42_smoke_ac1013\best.pt,,completed,smoke_test
+20260827_103548_resnet50_seed42_smoke_8674f3,resnet50,42,configs/training.yaml,results\checkpoints\20260827_103548_resnet50_seed42_smoke_8674f3\best.pt,,completed,smoke_test
