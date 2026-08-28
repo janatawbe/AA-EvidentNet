@@ -1062,17 +1062,17 @@ All pipeline stages run through a single entry point:
 python run_pipeline.py <command> [options]
 ```
 
-Commands (recognized now; `audit`, `prepare_dataset`, `model_check`, and
-`baseline` are implemented, the rest fail with a clear message rather
-than doing nothing):
+Commands (recognized now; `audit`, `prepare_dataset`, `model_check`,
+`baseline`, and `train` are implemented, the rest fail with a clear
+message rather than doing nothing):
 
 | Command            | Purpose                                             |
 |---------------------|------------------------------------------------------|
 | `audit`             | Dataset audit: counts, duplicates, corruption, leakage |
 | `prepare_dataset`   | Audit + eligibility + 70/20/10 original split + balanced (2,000/class) training set |
 | `model_check [--pretrained]` | Instantiate ResNet50/EfficientNetB0/MaxViT, run a synthetic forward pass, report shapes/params (never trains; offline unless `--pretrained`) |
-| `baseline --model {resnet50,efficientnetb0,maxvit} [--smoke-test] [--resume <ckpt>]` | Train a baseline via the reusable training engine (`src/training/`); trains on `train_balanced.csv`, validates on `val_original.csv`, never touches the test set |
-| `train --model aa_evidentnet` | Train the proposed model — architecture exists (`create_model`), but **the training objective/loop is not yet wired up**; fails clearly |
+| `baseline --model {resnet50,efficientnetb0,maxvit} [--smoke-test] [--resume <ckpt>] [--dataset-config <path>]` | Train a baseline via the reusable training engine (`src/training/`); trains on `train_balanced.csv`, validates on `val_original.csv`, never touches the test set |
+| `train --model aa_evidentnet [--smoke-test] [--resume <ckpt>] [--dataset-config <path>]` | Train the proposed model via the combined classification + CS-SupCon + EDL objective (`src/losses/combined.py`, Task 7 completion); same manifests/test-set policy as `baseline` |
 | `ablation`          | Ablation studies over proposed-model components     |
 | `hard_pairs`        | Confusable-class-pair analysis                      |
 | `calibration`       | Calibration + uncertainty quantification evaluation |
@@ -1083,9 +1083,27 @@ than doing nothing):
 | `publication`       | Assemble publication tables/figures                 |
 | `final_test`        | Final held-out test evaluation                      |
 
-Common options: `--config`, `--seed`, `--device`, `--batch-size`, `--epochs`,
-`--smoke-test`, `--num-workers`. Run `python run_pipeline.py --help` or
+Common options: `--config`, `--seed`, `--device {auto,cpu,cuda}`,
+`--batch-size`, `--epochs`, `--smoke-test`, `--num-workers`. `--device auto`
+(the default) selects CUDA automatically when available and falls back to
+CPU otherwise — no GPU model is ever hardcoded. `baseline`/`train`
+additionally accept `--dataset-config <path>` (default `configs/dataset.yaml`)
+to point the run at an externally-mounted dataset location (e.g. for
+Google Colab — see `docs/COLAB_SETUP.md`) without editing any source file
+or the real `configs/dataset.yaml`. Run `python run_pipeline.py --help` or
 `python run_pipeline.py <command> --help` for details.
+
+### Running on Google Colab
+
+See **`docs/COLAB_SETUP.md`** for a full guide: enabling a free GPU
+runtime, installing dependencies, mounting the dataset externally
+(without copying it into git or regenerating the split/manifests),
+verifying CUDA, running a GPU smoke test, and persisting
+checkpoints/logs/the experiment registry to Google Drive (a Colab
+runtime's local disk is not persistent). The dataset, split, class
+definitions, augmentation methodology, and all hyperparameters are
+identical on Colab and on the laptop — only the compute device and the
+physical location of the data/outputs differ.
 
 ## Reproducibility principles
 

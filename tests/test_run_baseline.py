@@ -191,6 +191,24 @@ def test_resume_from_checkpoint_restores_epoch_and_rejects_incompatible_model(tm
         )
 
 
+def test_run_baseline_training_checkpoint_includes_scaler_state(tmp_path):
+    # Colab/CUDA readiness: every checkpoint must carry scaler_state_dict
+    # (even if trivial/disabled, as on this CPU-only machine) so a CUDA +
+    # mixed-precision run can resume its AMP loss-scale state faithfully.
+    dataset_cfg, models_cfg, training_cfg, registry_path = _tmp_configs(tmp_path)
+    summary = run_baseline_training(
+        FAST_MODEL,
+        dataset_config_path=dataset_cfg,
+        models_config_path=models_cfg,
+        training_config_path=training_cfg,
+        smoke_test=True,
+        registry_path=registry_path,
+    )
+    checkpoint = load_checkpoint(summary.best_checkpoint_path)
+    assert "scaler_state_dict" in checkpoint
+    assert checkpoint["scaler_state_dict"] is not None  # a real (disabled-on-CPU) GradScaler state
+
+
 def test_run_baseline_training_smoke_test_does_not_create_test_manifest_path(tmp_path):
     # Behavioral guarantee (not a source-text grep, which would also match
     # this module's own docstring explaining the exclusion): running a

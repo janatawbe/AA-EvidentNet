@@ -88,6 +88,16 @@ def test_run_aa_evidentnet_training_smoke_test_end_to_end(tmp_path):
     assert registry_rows[0]["test_result"] == ""  # test set never used
 
 
+def test_run_aa_evidentnet_training_checkpoint_includes_scaler_state(tmp_path):
+    # Colab/CUDA readiness: every checkpoint must carry scaler_state_dict
+    # (even if trivial/disabled, as on this CPU-only machine) so a CUDA +
+    # mixed-precision run can resume its AMP loss-scale state faithfully.
+    summary, _ = _run(tmp_path, seed=42, smoke_test=True)
+    checkpoint = load_checkpoint(summary.best_checkpoint_path)
+    assert "scaler_state_dict" in checkpoint
+    assert checkpoint["scaler_state_dict"] is not None
+
+
 def test_run_aa_evidentnet_training_updates_real_model_weights(tmp_path):
     summary, _ = _run(tmp_path, seed=42, smoke_test=True)
     checkpoint = load_checkpoint(summary.best_checkpoint_path)

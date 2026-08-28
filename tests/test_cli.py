@@ -261,8 +261,10 @@ def test_main_model_check_command_default_is_offline_not_pretrained(tmp_path, ca
 # --smoke-test, never bare, since a bare invocation would kick off a real,
 # unbounded training run against the real dataset (dataset.yaml/training.yaml
 # paths are not overridable via --config for this command - --config only
-# points at models.yaml - so these tests unavoidably touch the real, but
-# gitignored, results/logs, results/checkpoints, and experiments/registry.csv). ---
+# points at models.yaml (use --dataset-config, tested separately below, to
+# override configs/dataset.yaml) - so these tests unavoidably touch the
+# real, but gitignored, results/logs, results/checkpoints, and
+# experiments/registry.csv). ---
 
 
 def test_main_baseline_command_smoke_test_passes():
@@ -283,3 +285,38 @@ def test_main_train_command_non_aa_evidentnet_model_fails_clearly(capsys):
     captured = capsys.readouterr()
     assert "NOT IMPLEMENTED" in captured.err
     assert "baseline" in captured.err
+
+
+# --- --dataset-config (Colab data-root override): baseline/train accept a
+# custom dataset.yaml path without any source change (still --smoke-test
+# only here, same rationale as above). ---
+
+
+def test_parser_dataset_config_defaults_to_real_dataset_yaml():
+    parser = run_pipeline.build_parser()
+    for command in ("baseline", "train"):
+        args = parser.parse_args([command, "--model", "resnet50"])
+        assert args.dataset_config == "configs/dataset.yaml"
+
+
+def test_parser_dataset_config_accepts_override():
+    parser = run_pipeline.build_parser()
+    args = parser.parse_args(["baseline", "--model", "resnet50", "--dataset-config", "configs/dataset.colab.yaml"])
+    assert args.dataset_config == "configs/dataset.colab.yaml"
+
+
+def test_main_baseline_command_honors_dataset_config_override(tmp_path):
+    # A custom dataset.yaml (10 dummy classes, matching configs/models.yaml's
+    # default num_classes=10) passed via --dataset-config must actually be
+    # used - not silently ignored in favor of the real configs/dataset.yaml.
+    from tests.conftest import write_min_dataset_config
+
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    mapping = {name: name for name in ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta", "Iota", "Kappa"]}
+    dataset_config_path = write_min_dataset_config(tmp_path, mapping, raw_dir, audit_dir)
+
+    exit_code = run_pipeline.main(
+        ["baseline", "--model", "resnet50", "--smoke-test", "--dataset-config", str(dataset_config_path)]
+    )
+    assert exit_code == 0

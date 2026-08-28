@@ -355,6 +355,7 @@ def run_aa_evidentnet_training(
             num_classes=num_classes,
             dataset_manifest_hash=dataset_manifest_hash,
             git_commit=git_commit,
+            scaler=trainer.scaler,
         )
 
         if epoch_result.is_best:
@@ -380,6 +381,12 @@ def run_aa_evidentnet_training(
         start_epoch=start_epoch,
         initial_best_metric=initial_best_metric,
     )
+
+    # The scaler is only constructed inside Trainer.__init__, so its state
+    # (relevant only for CUDA + mixed_precision; a no-op restore on CPU)
+    # can only be restored after Trainer exists.
+    if resume_from is not None and checkpoint.get("scaler_state_dict") is not None:
+        trainer.scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
     try:
         fit_result = trainer.fit(

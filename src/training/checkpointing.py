@@ -54,7 +54,15 @@ def build_checkpoint(
     num_classes: int,
     dataset_manifest_hash: str,
     git_commit: Optional[str],
+    scaler: Optional[Any] = None,
 ) -> Dict[str, Any]:
+    """`scaler` (optional): the AMP `torch.amp.GradScaler` in use, if any.
+    Saving its state matters only for CUDA+mixed-precision runs (on CPU the
+    scaler is always disabled and its state is trivial) - without it, a
+    CUDA run resumed from a checkpoint would restart AMP's adaptive loss
+    scale from its default rather than where it left off. Harmless to omit
+    (pass None, the default) for CPU-only runs or callers that predate
+    this parameter."""
     metadata = CheckpointMetadata(
         schema_version=CHECKPOINT_SCHEMA_VERSION,
         model_name=model_name,
@@ -74,6 +82,7 @@ def build_checkpoint(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
     }
 
 
@@ -111,15 +120,24 @@ def restore_training_state(
     model: torch.nn.Module,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
+    scaler: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Restore model/optimizer/scheduler in place; return the epoch/best
-    metric to resume from. Caller is responsible for calling
-    assert_checkpoint_compatible() first."""
+    """Restore model/optimizer/scheduler/AMP-scaler in place; return the
+    epoch/best metric to resume from. Caller is responsible for calling
+    assert_checkpoint_compatible() first.
+
+    `scaler` (optional): the AMP `torch.amp.GradScaler` to restore state
+    into. Checkpoints written before this parameter existed simply have no
+    `scaler_state_dict` key (`.get(...)` returns None), so old checkpoints
+    still resume correctly - the scaler just starts from its default
+    state, same as always."""
     model.load_state_dict(checkpoint["model_state_dict"])
     if optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    if scaler is not None and checkpoint.get("scaler_state_dict") is not None:
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
     metadata = checkpoint.get("metadata", {})
     return {"epoch": metadata.get("epoch", 0), "best_metric": metadata.get("best_metric")}

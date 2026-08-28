@@ -356,6 +356,63 @@ intent, not necessarily what was actually installed at run time.
   in this CPU-only environment. **No AA-EvidentNet performance number
   exists anywhere in this repository.**
 
+## Colab/GPU preparation (no training performed)
+
+See `docs/COLAB_SETUP.md` for the full guide. Summary of what changed and
+what was verified, all **preparation only** — no model was trained as
+part of this work, on CPU or GPU:
+
+- **Device selection and mixed precision were already fully correct** for
+  CUDA before this work (verified by static code review, since this
+  development machine's torch build has no CUDA support at all —
+  `model.to(torch.device("cuda"))` itself raises `AssertionError: Torch
+  not compiled with CUDA enabled`, so genuine CUDA execution is not
+  possible here): `resolve_device("auto")` already picks CUDA when
+  available and falls back to CPU otherwise with no code path assuming a
+  specific GPU model; `Trainer.amp_enabled = bool(config.mixed_precision)
+  and self.device.type == "cuda"` already only activates AMP on CUDA;
+  `torch.amp.autocast(device_type=self.device.type, ...)` already tracks
+  whichever device is actually in use. `--device {auto,cpu,cuda}`
+  continues to work unchanged. New tests
+  (`tests/test_trainer.py::test_resolve_device_auto_picks_cuda_when_available`
+  and related) verify this decision logic via monkeypatching
+  `torch.cuda.is_available`, since real CUDA execution cannot be tested on
+  this machine — actual GPU execution must happen on Colab.
+- **Fixed**: checkpoints did not save the AMP `GradScaler`'s state.
+  `build_checkpoint`/`restore_training_state`
+  (`src/training/checkpointing.py`) now accept an optional `scaler`
+  parameter; `run_baseline.py`/`run_aa_evidentnet.py` pass `trainer.scaler`
+  through. This only matters for CUDA + `mixed_precision: true` (on CPU
+  the scaler is always disabled and its state is trivial); without it, a
+  CUDA run resumed from a checkpoint would silently restart AMP's
+  adaptive loss scale from its default rather than where it left off.
+  Fully backward compatible: a checkpoint written before this change has
+  no `scaler_state_dict` key at all, and `restore_training_state` treats
+  that exactly like an explicit `None` (skips the restore, no error).
+- **Added**: `--dataset-config` (`run_pipeline.py: baseline`/`train`,
+  default `configs/dataset.yaml`) — lets a Colab run point `paths.raw_dir`/
+  `paths.processed_dir`/`paths.manifests_dir`/`paths.audit_dir` at an
+  externally-mounted location (e.g. Google Drive) via a copy of
+  `configs/dataset.yaml` with only its `paths:` section changed, with no
+  source-code edit required. `class_names`, `class_directory_mapping`,
+  `split:` ratios, `target_train_samples_per_class`, and `augmentation:`
+  must remain byte-identical between the two files — this flag changes
+  *where the data is read from*, never *what the data or methodology is*.
+  Manifests (`data/manifests/*.csv`) already store paths relative to
+  `raw_dir`/`processed_dir`, so they remain valid unchanged regardless of
+  where those roots point.
+- **No dataset, split, class definition, augmentation methodology, or
+  loss/architecture hyperparameter was changed.** `data/raw/` (5,335
+  files) was not touched. `test_original.csv` continues to never be
+  referenced by any training code path — unchanged by this work.
+- The already-stopped ResNet50 run
+  (`20260827_153917_resnet50_seed42_5f8341`, `results/checkpoints/.../best.pt`,
+  epoch 2, `val_macro_f1=0.8811`) was verified intact and untouched
+  throughout this preparation work, and remains resumable exactly as
+  before (its checkpoint predates the `scaler_state_dict` field, so
+  resuming it will simply skip restoring scaler state, per the backward
+  compatibility described above).
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.

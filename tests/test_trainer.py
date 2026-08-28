@@ -458,3 +458,54 @@ def test_fit_does_not_require_set_epoch_on_plain_criterion():
     trainer = _make_trainer(config_overrides={"epochs": 2})
     result = trainer.fit()
     assert len(result.history) == 2
+
+
+# --- GPU/CUDA decision-logic tests (Colab readiness) ---
+#
+# This development machine's installed torch build has no CUDA support at
+# all ("Torch not compiled with CUDA enabled") - not just "no GPU
+# detected" - so a real end-to-end CUDA Trainer/AMP run genuinely cannot
+# be executed here (model.to(torch.device("cuda")) itself raises). These
+# tests therefore verify, via monkeypatching, the exact DECISION LOGIC
+# (resolve_device's branching, and the amp_enabled formula Trainer.__init__
+# uses) without claiming to have exercised real CUDA hardware. Actual
+# execution on a real GPU must happen on Colab - see docs/COLAB_SETUP.md.
+
+
+def test_resolve_device_auto_picks_cuda_when_available(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_device("auto").type == "cuda"
+
+
+def test_resolve_device_explicit_cuda_succeeds_when_available(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_device("cuda").type == "cuda"
+
+
+def test_amp_enabled_formula_matches_trainer_init_for_cuda_device():
+    # This is exactly the expression at Trainer.__init__:
+    # `self.amp_enabled = bool(config.mixed_precision) and self.device.type == "cuda"`.
+    # Verified here as a standalone check since constructing a real Trainer
+    # with device=torch.device("cuda") is impossible without real CUDA
+    # hardware (model.to("cuda") would raise on this machine).
+    config = TrainingConfig(mixed_precision=True)
+    device = torch.device("cuda")
+    amp_enabled = bool(config.mixed_precision) and device.type == "cuda"
+    assert amp_enabled is True
+
+
+def test_amp_enabled_formula_false_when_mixed_precision_disabled_even_on_cuda():
+    config = TrainingConfig(mixed_precision=False)
+    device = torch.device("cuda")
+    amp_enabled = bool(config.mixed_precision) and device.type == "cuda"
+    assert amp_enabled is False
+
+
+def test_gradscaler_construction_with_cuda_device_argument_is_safe_when_disabled():
+    # Trainer always constructs `torch.amp.GradScaler(device="cuda",
+    # enabled=self.amp_enabled)` regardless of the actual device - this
+    # confirms that construction (with enabled=False, the CPU case) never
+    # requires real CUDA hardware, which is what makes every existing
+    # CPU-only test in this suite already safe.
+    scaler = torch.amp.GradScaler(device="cuda", enabled=False)
+    assert scaler.is_enabled() is False

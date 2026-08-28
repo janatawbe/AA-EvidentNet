@@ -67,6 +67,19 @@ silently overwritten by another.
 trailing 6-hex random suffix (not just the timestamp) is what actually
 guarantees uniqueness for same-second runs.
 
+**On a non-persistent runtime (e.g. Google Colab — see
+`docs/COLAB_SETUP.md`)**: `results/logs/`, `results/checkpoints/`,
+`results/raw_predictions/`, `results/tables/`, and `results/figures/` are
+plain directories created via `Path.mkdir(parents=True)` — nothing in
+`RunLogger`/`checkpointing.save_checkpoint`/`run_model_check` assumes a
+specific (e.g. laptop-local) filesystem. Redirecting `results/` to
+persistent storage (a Drive-mounted symlink, or overriding
+`configs/training.yaml: checkpointing.save_dir`/`logging.log_dir` in a
+Colab-specific copy of that file) requires no source change. Only
+`experiments/registry.csv` needs to make it back into git explicitly
+(it's small and already tracked) — the heavy per-run directories above
+stay gitignored exactly as on the laptop.
+
 ## Experiment registry (`experiments/registry.csv`)
 
 **Implemented as of Task 6** (`src/training/registry.py`). Unlike

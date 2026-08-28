@@ -160,6 +160,18 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
                 help="Path to a checkpoint (.pt) to resume training from.",
             )
+            sub.add_argument(
+                "--dataset-config",
+                type=str,
+                default="configs/dataset.yaml",
+                help="Path to a YAML dataset config (default: %(default)s). "
+                "Override this to point `paths.raw_dir`/`paths.processed_dir`/"
+                "`paths.manifests_dir` at an external location (e.g. a mounted "
+                "Google Drive path on Colab) without editing configs/dataset.yaml "
+                "or any source file - copy it and change only the `paths:` "
+                "section; class names, split ratios, and augmentation policy "
+                "must stay identical to the original.",
+            )
         if name == "model_check":
             sub.add_argument(
                 "--pretrained",
@@ -229,6 +241,7 @@ def run_baseline_command(args: argparse.Namespace) -> None:
     """
     summary = run_baseline_training(
         model_name=args.model,
+        dataset_config_path=args.dataset_config,
         models_config_path=args.config,
         seed=args.seed,
         device_override=None if args.device == "auto" else args.device,
@@ -260,6 +273,7 @@ def run_train_command(args: argparse.Namespace) -> None:
             "Use `python run_pipeline.py baseline --model <name>` for a baseline."
         )
     summary = run_aa_evidentnet_training(
+        dataset_config_path=args.dataset_config,
         models_config_path=args.config,
         seed=args.seed,
         device_override=None if args.device == "auto" else args.device,

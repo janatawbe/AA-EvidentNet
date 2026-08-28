@@ -125,3 +125,102 @@ def test_restore_training_state_restores_model_and_optimizer(tmp_path):
     assert state["best_metric"] == 0.9
     for key, value in fresh_model.state_dict().items():
         assert torch.equal(value, mutated_state[key])
+
+
+# --- AMP GradScaler state (Colab/CUDA-readiness: matters only for CUDA +
+# mixed_precision runs - on CPU the scaler is always disabled and this is
+# an inert no-op, but the checkpoint schema must still round-trip it
+# correctly so a CUDA resume doesn't lose the adaptive loss-scale state). ---
+
+
+def test_build_checkpoint_omits_scaler_state_when_no_scaler_given():
+    model = _tiny_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+
+    checkpoint = build_checkpoint(
+        model, optimizer, scheduler, epoch=1, best_metric=0.5, monitor_metric="val_macro_f1",
+        training_config={}, seed=42, model_name="resnet50", architecture="resnet50",
+        num_classes=10, dataset_manifest_hash="h", git_commit="c",
+    )
+    assert "scaler_state_dict" in checkpoint
+    assert checkpoint["scaler_state_dict"] is None
+
+
+def test_build_checkpoint_includes_scaler_state_when_scaler_given():
+    model = _tiny_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=False)  # enabled=False: safe on CPU-only machines
+
+    checkpoint = build_checkpoint(
+        model, optimizer, scheduler, epoch=1, best_metric=0.5, monitor_metric="val_macro_f1",
+        training_config={}, seed=42, model_name="resnet50", architecture="resnet50",
+        num_classes=10, dataset_manifest_hash="h", git_commit="c", scaler=scaler,
+    )
+    assert checkpoint["scaler_state_dict"] is not None
+    assert checkpoint["scaler_state_dict"] == scaler.state_dict()
+
+
+def test_restore_training_state_restores_scaler_when_present(tmp_path):
+    model = _tiny_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=False)
+
+    checkpoint = build_checkpoint(
+        model, optimizer, scheduler, epoch=1, best_metric=0.5, monitor_metric="val_macro_f1",
+        training_config={}, seed=42, model_name="resnet50", architecture="resnet50",
+        num_classes=10, dataset_manifest_hash="h", git_commit="c", scaler=scaler,
+    )
+    path = tmp_path / "checkpoint.pt"
+    save_checkpoint(checkpoint, path)
+
+    fresh_scaler = torch.amp.GradScaler(device="cuda", enabled=False)
+    loaded = load_checkpoint(path)
+    # Must not raise, and must actually apply the saved scaler state.
+    restore_training_state(loaded, model, optimizer, scheduler, scaler=fresh_scaler)
+    assert fresh_scaler.state_dict() == scaler.state_dict()
+
+
+def test_restore_training_state_without_scaler_arg_is_backward_compatible(tmp_path):
+    # A checkpoint written WITH scaler state must still restore correctly
+    # when the caller doesn't pass a scaler at all (old call sites).
+    model = _tiny_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=False)
+
+    checkpoint = build_checkpoint(
+        model, optimizer, scheduler, epoch=2, best_metric=0.6, monitor_metric="val_macro_f1",
+        training_config={}, seed=42, model_name="resnet50", architecture="resnet50",
+        num_classes=10, dataset_manifest_hash="h", git_commit="c", scaler=scaler,
+    )
+    path = tmp_path / "checkpoint.pt"
+    save_checkpoint(checkpoint, path)
+
+    loaded = load_checkpoint(path)
+    state = restore_training_state(loaded, model, optimizer, scheduler)  # no scaler= at all
+    assert state["epoch"] == 2
+
+
+def test_restore_training_state_old_checkpoint_without_scaler_key_still_works(tmp_path):
+    # Simulates a checkpoint written before this parameter existed: no
+    # "scaler_state_dict" key at all in the saved dict.
+    model = _tiny_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+
+    checkpoint = build_checkpoint(
+        model, optimizer, scheduler, epoch=1, best_metric=0.5, monitor_metric="val_macro_f1",
+        training_config={}, seed=42, model_name="resnet50", architecture="resnet50",
+        num_classes=10, dataset_manifest_hash="h", git_commit="c",
+    )
+    del checkpoint["scaler_state_dict"]  # simulate a genuinely pre-existing old checkpoint
+    path = tmp_path / "old_checkpoint.pt"
+    save_checkpoint(checkpoint, path)
+
+    loaded = load_checkpoint(path)
+    fresh_scaler = torch.amp.GradScaler(device="cuda", enabled=False)
+    state = restore_training_state(loaded, model, optimizer, scheduler, scaler=fresh_scaler)
+    assert state["epoch"] == 1
