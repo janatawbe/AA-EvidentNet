@@ -41,6 +41,8 @@ from src.data.generate_balanced_dataset import (  # noqa: E402
     BalancedDatasetValidationError,
     run_generate_balanced_dataset,
 )
+from src.evaluation.final_test import FinalTestError, run_final_test  # noqa: E402
+from src.evaluation.metrics import MetricsInputError  # noqa: E402
 from src.losses.combined import CombinedObjectiveConfigError  # noqa: E402
 from src.losses.cs_supcon import CSSupConConfigError  # noqa: E402
 from src.losses.evidential import EvidentialConfigError  # noqa: E402
@@ -70,7 +72,15 @@ DEFAULT_CONFIGS = {
     "robustness": "configs/evaluation.yaml",
     "multi_seed": "configs/experiments.yaml",
     "publication": "configs/experiments.yaml",
-    "final_test": "configs/evaluation.yaml",
+    # models.yaml, not evaluation.yaml: --config here selects the model
+    # architecture config (same convention as baseline/train), consistent
+    # with how run_final_test's `models_config_path` param is used.
+    # configs/evaluation.yaml is loaded separately, internally, with its
+    # own fixed default (src/evaluation/final_test.py:
+    # evaluation_config_path) - it is not CLI-overridable, since Task 8
+    # did not ask for that and the existing --config flag is already
+    # spoken for by models.yaml here.
+    "final_test": "configs/models.yaml",
 }
 
 
@@ -146,19 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in commands:
         sub = subparsers.add_parser(name, help=help_text, description=help_text)
         add_common_arguments(sub, name)
-        if name in ("baseline", "train"):
+        if name in ("baseline", "train", "final_test"):
             sub.add_argument(
                 "--model",
                 type=str,
                 required=True,
                 help="Model name (see configs/models.yaml registry, "
                 "e.g. 'maxvit' or 'aa_evidentnet').",
-            )
-            sub.add_argument(
-                "--resume",
-                type=str,
-                default=None,
-                help="Path to a checkpoint (.pt) to resume training from.",
             )
             sub.add_argument(
                 "--dataset-config",
@@ -171,6 +175,22 @@ def build_parser() -> argparse.ArgumentParser:
                 "or any source file - copy it and change only the `paths:` "
                 "section; class names, split ratios, and augmentation policy "
                 "must stay identical to the original.",
+            )
+        if name in ("baseline", "train"):
+            sub.add_argument(
+                "--resume",
+                type=str,
+                default=None,
+                help="Path to a checkpoint (.pt) to resume training from.",
+            )
+        if name == "final_test":
+            sub.add_argument(
+                "--checkpoint",
+                type=str,
+                required=True,
+                help="Path to the FROZEN checkpoint (.pt) to evaluate on the held-out "
+                "test set (data/manifests/test_original.csv). Weights are loaded and "
+                "never modified - no training, no tuning, no optimizer/scheduler.",
             )
         if name == "model_check":
             sub.add_argument(
@@ -289,6 +309,34 @@ def run_train_command(args: argparse.Namespace) -> None:
     )
 
 
+def run_final_test_command(args: argparse.Namespace) -> None:
+    """python run_pipeline.py final_test --model <name> --checkpoint <path.pt>.
+
+    Evaluates a single FROZEN, already-trained checkpoint on the held-out
+    data/manifests/test_original.csv (src/evaluation/final_test.py). Never
+    trains, never tunes, never modifies the checkpoint's weights - loads
+    them once via the existing checkpoint utilities and runs inference
+    only. Supports all four registered models (resnet50, efficientnetb0,
+    maxvit, aa_evidentnet).
+    """
+    summary = run_final_test(
+        model_name=args.model,
+        checkpoint_path=args.checkpoint,
+        dataset_config_path=args.dataset_config,
+        models_config_path=args.config,
+        seed=args.seed,
+        device_override=None if args.device == "auto" else args.device,
+        num_workers_override=args.num_workers,
+        batch_size_override=args.batch_size,
+    )
+    print(
+        f"[run_pipeline] eval_run_id={summary.eval_run_id} model={summary.model_name} "
+        f"n={summary.num_samples} accuracy={summary.overall_metrics.get('accuracy')} "
+        f"macro_f1={summary.overall_metrics.get('macro_f1')} "
+        f"predictions={summary.predictions_path} registry_updated={summary.registry_updated}"
+    )
+
+
 def dispatch(args: argparse.Namespace) -> None:
     command = args.command
 
@@ -306,7 +354,7 @@ def dispatch(args: argparse.Namespace) -> None:
         "robustness": lambda: not_implemented(command, "src/evaluation (robustness)"),
         "multi_seed": lambda: not_implemented(command, "src/statistics (multi-seed aggregation)"),
         "publication": lambda: not_implemented(command, "src/visualization + src/statistics (publication assets)"),
-        "final_test": lambda: not_implemented(command, "src/evaluation (final held-out test)"),
+        "final_test": lambda: run_final_test_command(args),
     }
 
     handlers[command]()
@@ -357,6 +405,9 @@ def main(argv=None) -> int:
         return 1
     except TrainerError as e:
         print(f"[run_pipeline] TRAINER ERROR: {e}", file=sys.stderr)
+        return 1
+    except (FinalTestError, MetricsInputError) as e:
+        print(f"[run_pipeline] FINAL TEST ERROR: {e}", file=sys.stderr)
         return 1
 
     return 0

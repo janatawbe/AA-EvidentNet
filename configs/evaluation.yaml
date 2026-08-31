@@ -1,11 +1,18 @@
 # Evaluation configuration.
 #
-# NOTE: No evaluation code is implemented yet. This reserves the parameter
-# schema for later tasks (calibration, selective prediction, robustness).
-# Thresholds/bin counts below are PROVISIONAL defaults.
+# `final_test` (Task 8, src/evaluation/final_test.py) is implemented and
+# uses `final_test:` and `output_paths:` below. Calibration, selective
+# prediction, and robustness remain schema-only placeholders for later
+# tasks - nothing reads `calibration:`/`selective_prediction:`/
+# `robustness:` yet. Thresholds/bin counts under those sections are
+# PROVISIONAL defaults, not yet used by any code.
 
 seed: 42
 
+# Core final-test metrics (Task 8) - matches exactly what
+# src/evaluation/metrics.py computes; `pr_auc_macro` added here since the
+# original placeholder list predates Task 8's implementation and omitted
+# it.
 metrics:
   - accuracy
   - balanced_accuracy
@@ -13,7 +20,22 @@ metrics:
   - recall_macro
   - f1_macro
   - auroc_macro
+  - pr_auc_macro
   - confusion_matrix
+
+# Final-test inference settings (Task 8). These affect only how many
+# samples are batched per forward pass and how many dataloader worker
+# processes are used - never what data is evaluated or how predictions
+# are computed (inference is always plain fp32, torch.inference_mode(),
+# model.eval(), no shuffling, no dropped samples - see
+# src/evaluation/final_test.py). batch_size=16 matches the project's
+# other default batch size (configs/training.yaml); num_workers=2 matches
+# the value already verified safe for reproducibility on Colab (see
+# REPRODUCIBILITY.md) - runtime preprocessing has no randomness, so worker
+# count cannot affect results, only throughput.
+final_test:
+  batch_size: 16
+  num_workers: 2
 
 calibration:
   num_bins: 15

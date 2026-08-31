@@ -413,6 +413,105 @@ part of this work, on CPU or GPU:
   resuming it will simply skip restoring scaler state, per the backward
   compatibility described above).
 
+## Final test evaluation reproducibility (Task 8)
+
+**Naming note**: this is the *original* project task-numbering's Task 8
+(the final held-out test evaluation pipeline) — distinct from the
+"CS-SupCon reproducibility (Task 8)" section earlier in this document,
+which used this project's own internal session numbering (established
+before a later audit identified the mismatch between the two numbering
+schemes; see the Tasks 1-9 completion audit). No section heading above
+was renamed to avoid rewriting already-accurate history — read heading
+numbers in context, not as a single global sequence.
+
+- `src/evaluation/final_test.py: run_final_test` (CLI: `python
+  run_pipeline.py final_test --model <name> --checkpoint <path>`)
+  evaluates a single frozen checkpoint for any of the four registered
+  models. Reuses, unmodified: `src/models/factory.py: create_model`,
+  `src/training/checkpointing.py: load_checkpoint` /
+  `assert_checkpoint_compatible` / `restore_training_state`,
+  `src/data/dataset.py: RetinalDataset.from_manifest(...,
+  expected_split="test", require_all_original=True)`, and
+  `src/data/dataloaders.py: build_eval_dataloader`. No training engine
+  (`Trainer`) is used — there is no optimizer, no scheduler, and no
+  backward pass anywhere in this module; inference runs once under
+  `torch.inference_mode()` in plain fp32 (deliberately no AMP, even on
+  CUDA), and `model.eval()` is called before any forward pass.
+- **Test-set discipline**: this module is the only place in the codebase
+  (besides its own test) that loads `data/manifests/test_original.csv`.
+  It is never used for training, model selection, hyperparameter tuning,
+  calibration fitting, or threshold selection — `final_test` only ever
+  reads a manifest and a checkpoint and writes results out.
+- **Core metrics** (`src/evaluation/metrics.py`, reusing scikit-learn
+  throughout, no metric math reimplemented): overall accuracy, balanced
+  accuracy, macro precision/recall/F1 (sklearn's `zero_division=0`
+  convention, matching `src/training/metrics.py`), macro ROC-AUC, macro
+  PR-AUC; per-class precision/recall/specificity/F1/ROC-AUC/PR-AUC; a
+  full K×K confusion matrix. Every sklearn call is passed
+  `labels=range(num_classes)` explicitly, so a class absent from a given
+  evaluation never silently reshapes a result. Undefined per-class
+  metrics (zero positive or zero negative samples) are reported as
+  `None` with an explicit reason string, never coerced to 0.0.
+- **Raw per-sample export**: `results/raw_predictions/<eval_run_id>/predictions.csv`
+  — `sample_id` is the manifest's `original_id` (SHA-256-derived,
+  content-stable — identical across all four models' evaluations of the
+  same physical image, enabling exact sample-by-sample alignment for
+  later paired statistical tests), plus true/predicted class, `correct`,
+  `logit_0..9`, `prob_0..9` (softmax, identical formulation for all four
+  models), and for AA-EvidentNet additionally `evidence_0..9`,
+  `dirichlet_alpha_0..9`, `evidential_prob_0..9`, `uncertainty` — all
+  read directly from `AAEvidentNetOutput`, never recomputed with a
+  different formulation. Before writing, `final_test` verifies the
+  exported row count equals the loaded manifest's row count and every
+  `sample_id` is unique, raising `FinalTestError` (refusing to write
+  anything) if either check fails.
+- **Class ordering**: `0..9` always means
+  `sorted(configs/dataset.yaml: class_directory_mapping.keys())` — the
+  same ordering `src.data.dataset.build_class_to_idx` uses everywhere
+  else. Recorded once, explicitly, in every run's `metadata.json:
+  class_names` rather than repeated (and risking drift) in column
+  headers.
+- **Provenance metadata** (`results/tables/<eval_run_id>/metadata.json`):
+  model name, the checkpoint's inferred training `run_id` (from its
+  parent directory name — a path convention, not a field stored inside
+  the checkpoint itself, and labeled as such), training seed (from
+  checkpoint metadata) and the eval invocation's own seed, checkpoint
+  path + SHA-256, checkpoint's saved epoch/monitor-metric/best-metric,
+  test manifest path + SHA-256, exact class-name ordering, sample count,
+  dataset/models/evaluation config paths + a combined config hash, git
+  commit, timestamp, device, and every output path.
+- **Outputs never collide**: each invocation gets a fresh `eval_run_id`
+  (`finaltest_<model>_seed<seed>_<timestamp>_<6-hex>`, the same
+  `generate_run_id` mechanism training runs already use) — two
+  evaluations of the same checkpoint produce two independent,
+  non-overwriting output directories.
+- **Registry**: on success, if the checkpoint's inferred training
+  `run_id` matches an existing `experiments/registry.csv` row, that
+  row's `test_result` column is updated via the existing `update_run()`
+  with a concise summary string. `register_run()` (which creates a new
+  row) is never called by this module — an unmatched `run_id` is
+  reported (`FinalTestSummary.registry_updated=False`), not guessed at
+  or fabricated. On any failure, the registry is never touched.
+- **83 new tests** (`tests/test_evaluation_metrics.py`: 26,
+  `tests/test_final_test.py`: 21, plus CLI dispatch tests in
+  `tests/test_cli.py`), covering hand-verified metric correctness
+  (confusion matrix, accuracy, balanced accuracy, macro
+  precision/recall/F1, per-class precision/recall/specificity/F1,
+  perfect-separation and undefined-case ROC-AUC/PR-AUC), the full
+  `run_final_test` orchestration (schema, sample-id uniqueness,
+  probability normalization, AA-EvidentNet evidential dimensions,
+  metadata hash correctness, checkpoint-file-never-modified,
+  `model.eval()` called, no optimizer ever constructed, no backward pass
+  ever called, non-test/augmented manifest rejection, incompatible
+  checkpoint rejection, registry update/non-update/untouched-on-failure,
+  non-colliding output directories), and CLI parsing/dispatch. All tests
+  use tiny synthetic fixtures under `tmp_path` — **none ever load
+  `data/manifests/test_original.csv` or `data/raw/`.**
+- **No real inference was performed on `test_original.csv`** as part of
+  implementing or testing Task 8 — confirmed by `test_original.csv`'s
+  unchanged mtime and `data/raw/`'s unchanged file count (5,335)
+  throughout this work.
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.

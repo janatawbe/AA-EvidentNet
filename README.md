@@ -1003,6 +1003,69 @@ Pterygium, 2,000 training samples come from only 12 original photographs
 additional patients. Any statistical claim (confidence intervals,
 generalization discussion) must be made with respect to (3), not (2).
 
+## Final test evaluation (Task 8, `src/evaluation/`)
+
+**The held-out test set must only be evaluated after model architecture,
+training configuration, checkpoints, and model-selection decisions are
+frozen.** This is not a suggestion — it is the entire reason
+`test_original.csv` has been kept untouched by every prior task's code
+(see "Dataset assumptions" above): a test set that influenced any
+earlier decision is no longer a valid estimate of generalization.
+
+### What `final_test` does
+
+```bash
+python run_pipeline.py final_test --model <name> --checkpoint <path/to/best.pt> [--device auto|cpu|cuda] [--num-workers N]
+```
+
+- `--model`: one of `resnet50`, `efficientnetb0`, `maxvit`, `aa_evidentnet` — all four are supported identically (`src/evaluation/final_test.py: ALL_MODEL_NAMES`).
+- `--checkpoint`: path to the **frozen** checkpoint to evaluate. Its weights are loaded via the existing `load_checkpoint`/`assert_checkpoint_compatible`/`restore_training_state` utilities (`src/training/checkpointing.py`, unmodified) and are **never** written back to, never updated by an optimizer (none is ever constructed), and never touched by a backward pass (`torch.inference_mode()` throughout, plain fp32 — deliberately no AMP, even on CUDA, so the exported logits/probabilities a later analysis depends on are not device/precision-dependent).
+- `--dataset-config` (default `configs/dataset.yaml`), `--config` (default `configs/models.yaml`, model architecture — **not** `configs/evaluation.yaml`, which `final_test` loads internally with its own fixed default), `--seed`, `--batch-size` are also accepted (shared CLI plumbing); `--epochs`/`--smoke-test` are parsed but unused by this command (same as several other commands that share the common argument parser).
+- Always evaluates `data/manifests/test_original.csv`, loaded via `RetinalDataset.from_manifest(..., expected_split="test", require_all_original=True)` — the exact same safeguard used nowhere else except here; a manifest containing a non-test-split row or an augmented (non-original) row is rejected with `DatasetManifestError` before any inference happens.
+- This is the **only** place in the codebase (besides its own test) that ever loads `test_original.csv`. `src/training/run_baseline.py`/`run_aa_evidentnet.py` still never reference it — nothing about Task 8 changed that policy.
+
+### Metrics produced (`src/evaluation/metrics.py`)
+
+**Overall**: accuracy, balanced accuracy, macro precision/recall/F1 (sklearn's `zero_division=0` convention, matching `src/training/metrics.py`'s existing convention), macro ROC-AUC, macro PR-AUC.
+**Per class**: precision, recall (sensitivity), specificity, F1, ROC-AUC, PR-AUC, plus `support`/`predicted_count` and explicit `*_defined` booleans.
+**Confusion matrix**: full K×K, fixed class ordering (`labels=range(num_classes)` passed explicitly to every sklearn call — a class with zero samples in a given evaluation never silently reshapes the matrix).
+
+Undefined metrics (e.g. a class with zero positive or zero negative samples) are reported as `None` with an explicit reason string — never silently coerced to `0.0` or a fabricated value. Macro ROC-AUC/PR-AUC report how many of the 10 classes actually contributed to the average (`macro_roc_auc_num_classes_defined`/`macro_pr_auc_num_classes_defined`).
+
+### Raw per-sample prediction export (the critical artifact)
+
+Every invocation writes `results/raw_predictions/<eval_run_id>/predictions.csv` with, for **every** model:
+
+`sample_id` (the manifest's `original_id` — a SHA-256-derived, content-stable identifier that is **identical across all four models' evaluations** for the same physical image, enabling exact sample-by-sample alignment for later paired statistical tests), `image_path`, `true_class_index`/`true_class_name`, `predicted_class_index`/`predicted_class_name`, `correct`, `max_probability`, `logit_0..logit_9`, `prob_0..prob_9` (softmax of the logits — computed identically for all four models, so cross-model comparison is apples-to-apples).
+
+**For AA-EvidentNet additionally**: `evidence_0..evidence_9`, `dirichlet_alpha_0..dirichlet_alpha_9`, `evidential_prob_0..evidential_prob_9` (the Dirichlet-expected probability — deliberately kept **separate** from the ordinary softmax `prob_*` columns above, never conflated), and `uncertainty` (`= K / sum(alpha)`) — all read directly from the model's own `AAEvidentNetOutput` (`return_features=True`), never recomputed with a different formulation.
+
+Before writing anything, `final_test` verifies: exported prediction count equals the loaded manifest's row count, and every `sample_id` is unique — both raise `FinalTestError` (refusing to write output) if violated.
+
+### Explicit class ordering
+
+`0..9` always means `sorted(configs/dataset.yaml: class_directory_mapping.keys())` — the exact same ordering `src.data.dataset.build_class_to_idx` uses everywhere else in this project. This ordering is recorded once, explicitly, in every run's `metadata.json: class_names` — logits/probabilities/evidence/alpha columns are never labeled with class names directly (to avoid duplicating and risking a mismatch with that authoritative list), but their positions are fixed and documented by it.
+
+### Outputs (uniquely per invocation — never overwritten)
+
+Every `final_test` call generates a fresh `eval_run_id` (`finaltest_<model>_seed<seed>_<timestamp>_<6-hex>`, via the same `generate_run_id` used for training runs) and writes:
+
+- `results/raw_predictions/<eval_run_id>/predictions.csv`
+- `results/tables/<eval_run_id>/overall_metrics.json`
+- `results/tables/<eval_run_id>/per_class_metrics.csv`
+- `results/tables/<eval_run_id>/confusion_matrix.csv`
+- `results/tables/<eval_run_id>/metadata.json` — model name, the checkpoint's inferred training `run_id` (from its parent directory name — a convention, not a field stored inside the checkpoint itself), training seed, checkpoint SHA-256, checkpoint's saved epoch/monitor metric/best metric, test manifest path + SHA-256, exact class-name ordering, sample count, config paths + a combined config hash, git commit, timestamp, device, and every other output path above.
+
+Two invocations (even of the same checkpoint) never collide — each gets its own timestamped `eval_run_id` directory.
+
+### Registry behavior
+
+After a **successful** evaluation, `final_test` looks up the checkpoint's inferred training `run_id` in `experiments/registry.csv`; if a matching row exists, its `test_result` column is updated (via the existing `update_run()`) with a concise summary (`macro_f1=...;accuracy=...;n=...;predictions=<path>`). If no matching row is found, nothing is created or modified — `final_test` **never** calls `register_run()` (which would create a new row); a missing match is reported (via `FinalTestSummary.registry_updated=False`) rather than guessed at. If evaluation fails for any reason, the registry is never touched.
+
+### What Task 8 deliberately does NOT do
+
+Compute bootstrap confidence intervals, McNemar tests, hard-pair analysis, ECE/Brier/reliability diagrams, selective-referral risk-coverage curves, Grad-CAM, or robustness perturbations — all of that is later-task work. Task 8's job is only to preserve, per sample, everything those later analyses will need (the full logits/probabilities/evidential outputs above) so none of them ever require rerunning clean test inference.
+
 ## Repository structure
 
 ```text
@@ -1063,8 +1126,8 @@ python run_pipeline.py <command> [options]
 ```
 
 Commands (recognized now; `audit`, `prepare_dataset`, `model_check`,
-`baseline`, and `train` are implemented, the rest fail with a clear
-message rather than doing nothing):
+`baseline`, `train`, and `final_test` are implemented, the rest fail with
+a clear message rather than doing nothing):
 
 | Command            | Purpose                                             |
 |---------------------|------------------------------------------------------|
@@ -1081,7 +1144,7 @@ message rather than doing nothing):
 | `robustness`        | Robustness to input perturbations                   |
 | `multi_seed`        | Aggregate results across seeds                      |
 | `publication`       | Assemble publication tables/figures                 |
-| `final_test`        | Final held-out test evaluation                      |
+| `final_test --model {resnet50,efficientnetb0,maxvit,aa_evidentnet} --checkpoint <ckpt> [--num-workers N]` | Evaluate a FROZEN checkpoint on `test_original.csv` (`src/evaluation/final_test.py`, Task 8) - see "Final test evaluation" above |
 
 Common options: `--config`, `--seed`, `--device {auto,cpu,cuda}`,
 `--batch-size`, `--epochs`, `--smoke-test`, `--num-workers`. `--device auto`
