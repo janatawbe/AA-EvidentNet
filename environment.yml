@@ -11,7 +11,7 @@ dependencies:
   - pillow=12.1.1
   - pyyaml=6.0.3
   - scikit-learn=1.7.2
-  - matplotlib
+  - matplotlib=3.10.9
   - tqdm
   - pytest=9.1.1
   - pip:

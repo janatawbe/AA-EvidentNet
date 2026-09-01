@@ -22,10 +22,11 @@ from tests.conftest import make_image, make_invalid_image, write_min_dataset_con
 # test_main_audit_command_*, test_main_prepare_dataset_command_*, and
 # test_main_model_check_command_* below); every other command in this list
 # is still recognized by the parser but not yet implemented. "baseline",
-# "train" (MODEL_COMMANDS below), "final_test", and "robustness" (their own
-# dedicated tests below - both require --model AND --checkpoint, so they
-# don't fit this bare-command parametrization) are also implemented but
-# excluded from this list for the same reason.
+# "train" (MODEL_COMMANDS below), "final_test", "robustness", and
+# "ood_uncertainty" (their own dedicated tests below - all three require
+# --model AND --checkpoint, so they don't fit this bare-command
+# parametrization) are also implemented but excluded from this list for the
+# same reason.
 ALL_COMMANDS = [
     "audit",
     "prepare_dataset",
@@ -507,6 +508,167 @@ def test_main_robustness_command_end_to_end(tmp_path):
         [
             "robustness",
             "--model", "resnet50",
+            "--checkpoint", str(checkpoint_path),
+            "--dataset-config", str(dataset_config_path),
+            "--config", str(models_config_path),
+            "--device", "cpu",
+            "--num-workers", "0",
+        ]
+    )
+    assert exit_code == 0
+
+
+# --- "ood_uncertainty" is implemented: requires --model AND --checkpoint
+# (same shape as "final_test"/"robustness" above), so it also needs its own
+# dedicated tests. AA-EvidentNet only (baselines are explicitly rejected).
+# Uses a tiny synthetic fixture with train_original.csv/val_original.csv/
+# test_original.csv all present (calibration needs the first two;
+# evaluation needs the third) - never touches the real
+# data/manifests/*.csv. ---
+
+
+def test_parser_ood_uncertainty_requires_model_and_checkpoint():
+    parser = run_pipeline.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ood_uncertainty"])  # missing both --model and --checkpoint
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ood_uncertainty", "--model", "aa_evidentnet"])  # missing --checkpoint
+
+
+def test_parser_ood_uncertainty_config_defaults_to_models_yaml():
+    parser = run_pipeline.build_parser()
+    args = parser.parse_args(["ood_uncertainty", "--model", "aa_evidentnet", "--checkpoint", "x.pt"])
+    assert args.config == "configs/models.yaml"
+
+
+def test_main_ood_uncertainty_rejects_non_aa_evidentnet_model(tmp_path):
+    from src.models.factory import create_model
+    from src.training.checkpointing import build_checkpoint, save_checkpoint
+    from tests.conftest import make_image, write_min_dataset_config, write_min_models_config
+    import csv
+    import torch
+    import yaml
+
+    canonical_classes = ["Alpha", "Beta", "Gamma"]
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    mapping = {name: name for name in canonical_classes}
+    dataset_config_path = write_min_dataset_config(tmp_path, mapping, raw_dir, audit_dir)
+    models_config_path = write_min_models_config(tmp_path, num_classes=len(canonical_classes))
+
+    manifests_dir = tmp_path / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    columns = ["path", "class", "split", "original_id", "parent_original_id", "is_original", "augmentation_type"]
+    rows = []
+    for name in canonical_classes:
+        make_image(raw_dir / name / f"{name}.jpg")
+        rows.append(
+            {
+                "path": f"{name}/{name}.jpg", "class": name, "split": "test",
+                "original_id": f"id_{name}", "parent_original_id": f"id_{name}",
+                "is_original": "true", "augmentation_type": "original",
+            }
+        )
+    with open(manifests_dir / "test_original.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    models_config = yaml.safe_load(models_config_path.read_text(encoding="utf-8"))
+    model = create_model("resnet50", models_config)
+    checkpoint = build_checkpoint(
+        model=model, optimizer=torch.optim.AdamW(model.parameters(), lr=1e-3), scheduler=None,
+        epoch=1, best_metric=0.5, monitor_metric="val_macro_f1", training_config={}, seed=42,
+        model_name="resnet50", architecture=model.architecture, num_classes=len(canonical_classes),
+        dataset_manifest_hash="h", git_commit="c",
+    )
+    checkpoint_dir = tmp_path / "checkpoints" / "cli_ood_reject_test_run"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_path = checkpoint_dir / "best.pt"
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    exit_code = run_pipeline.main(
+        [
+            "ood_uncertainty",
+            "--model", "resnet50",
+            "--checkpoint", str(checkpoint_path),
+            "--dataset-config", str(dataset_config_path),
+            "--config", str(models_config_path),
+            "--device", "cpu",
+            "--num-workers", "0",
+        ]
+    )
+    assert exit_code == 1
+
+
+def test_main_ood_uncertainty_command_end_to_end(tmp_path):
+    import csv
+
+    import torch
+    import yaml
+
+    from src.models.factory import create_model
+    from src.training.checkpointing import build_checkpoint, save_checkpoint
+    from tests.conftest import make_image, write_min_dataset_config, write_min_models_config
+
+    canonical_classes = ["Alpha", "Beta", "Gamma"]
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    mapping = {name: name for name in canonical_classes}
+    dataset_config_path = write_min_dataset_config(tmp_path, mapping, raw_dir, audit_dir)
+    models_config_path = write_min_models_config(tmp_path, num_classes=len(canonical_classes), include_aa_evidentnet=True)
+
+    manifests_dir = tmp_path / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    columns = ["path", "class", "split", "original_id", "parent_original_id", "is_original", "augmentation_type"]
+
+    def write_split(split, n_per_class):
+        rows = []
+        for name in canonical_classes:
+            for i in range(n_per_class):
+                filename = f"{split}_{name}_{i}.jpg"
+                make_image(raw_dir / name / filename)
+                rows.append(
+                    {
+                        "path": f"{name}/{filename}", "class": name, "split": split,
+                        "original_id": f"id_{split}_{name}_{i}", "parent_original_id": f"id_{split}_{name}_{i}",
+                        "is_original": "true", "augmentation_type": "original",
+                    }
+                )
+        with open(manifests_dir / f"{split}_original.csv", "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    write_split("train", 3)
+    write_split("val", 2)
+    write_split("test", 1)
+
+    models_config = yaml.safe_load(models_config_path.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    checkpoint = build_checkpoint(
+        model=model, optimizer=torch.optim.AdamW(model.parameters(), lr=1e-3), scheduler=None,
+        epoch=1, best_metric=0.5, monitor_metric="val_macro_f1", training_config={}, seed=42,
+        model_name="aa_evidentnet", architecture=model.architecture, num_classes=len(canonical_classes),
+        dataset_manifest_hash="h", git_commit="c",
+    )
+    checkpoint_dir = tmp_path / "checkpoints" / "cli_ood_uncertainty_test_run"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_path = checkpoint_dir / "best.pt"
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    # run_ood_uncertainty_evaluation's evaluation_config_path is not CLI-
+    # overridable (same convention as final_test's/robustness's), so this
+    # end-to-end CLI invocation necessarily uses the real
+    # configs/evaluation.yaml (full degradation table + weight grid) and
+    # writes into the real results/ood_uncertainty/<run_id>/ directory - a
+    # fresh, uniquely-timestamped subdirectory that never collides with or
+    # overwrites anything, exactly like test_main_robustness_command_end_to_end
+    # above already does for results/robustness/.
+    exit_code = run_pipeline.main(
+        [
+            "ood_uncertainty",
+            "--model", "aa_evidentnet",
             "--checkpoint", str(checkpoint_path),
             "--dataset-config", str(dataset_config_path),
             "--config", str(models_config_path),

@@ -1111,6 +1111,38 @@ Two invocations never collide (each gets its own timestamped directory), exactly
 
 Retrain, tune, or modify any checkpoint's weights; touch `experiments/registry.csv`; overwrite or rerun Task 8's clean final-test outputs; compute Grad-CAM, calibration (ECE/Brier), or selective-prediction curves — those remain separate, later-task work.
 
+## Feature-distance OOD detector + EDL uncertainty (`src/evaluation/ood_uncertainty.py`)
+
+**Motivation**: `robustness` (above) revealed that under severe Gaussian noise (std=0.10), AA-EvidentNet's accuracy collapses but its own EDL uncertainty *decreases* rather than rising — the model becomes confidently wrong instead of appropriately uncertain. This module adds a second, independent OOD-awareness signal — distance, in the model's own fused-embedding space, to the nearest per-class training prototype — and combines it with EDL uncertainty, so that at least one signal rises when the other fails. It is **AA-EvidentNet only** (baselines have neither a fused embedding nor an evidential head) and is a new evaluation component on top of the already-frozen checkpoint — it never retrains, fine-tunes, or otherwise modifies AA-EvidentNet's weights, and never touches anything `final_test` or `robustness` already produced.
+
+### What `ood_uncertainty` does
+
+```bash
+python run_pipeline.py ood_uncertainty --model aa_evidentnet --checkpoint <path/to/best.pt> [--device auto|cpu|cuda] [--num-workers N] [--batch-size N] [--dataset-config PATH] [--config PATH] [--seed N]
+```
+
+**Calibration (train_original.csv + val_original.csv only — never test_original.csv):**
+
+1. Forward-pass `train_original.csv` once through the frozen checkpoint (`model(images, return_features=True)`, reusing the exact same `AAEvidentNetOutput.embedding` the classifier and EDL head already share — no new model code) to compute one **class prototype** per class: the mean fused embedding of that class's training-original images.
+2. Forward-pass `val_original.csv` once to compute, per sample: EDL uncertainty, **cosine distance** (`1 - cosine_similarity`) to the nearest class prototype, and whether the checkpoint's own prediction was correct.
+3. Fit min-max normalization for both signals **from val_original's own distribution** — not train, since train samples define the prototypes and their own distances to "their" prototype are biased low. Normalized values are floored at 0 but deliberately **not** capped above 1, so a severely out-of-distribution test-time sample can push a normalized score arbitrarily high.
+4. Choose `weight` in `combined = normalized_edl + weight * normalized_ood` via a small, fixed grid search (`[0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]`, `configs/evaluation.yaml: ood_uncertainty.weight_grid`), selecting whichever weight maximizes **error-detection AUROC** (is the checkpoint's own prediction wrong?) on val_original's own predictions — never on test. Ties are broken toward the smallest weight.
+
+**Evaluation (frozen method, one-shot, read-only):** the calibrated method is then applied to clean `test_original.csv` and to every one of `robustness.py`'s 17 degradation/severity conditions (reused, not duplicated) plus an optional `clean_reference` row, computing per condition: `accuracy`; mean EDL uncertainty, OOD score, and combined score (both normalized and raw); error-detection AUROC/AUPRC for all three scores (`None` when undefined, e.g. zero errors in that condition); and a Spearman correlation between corruption severity and each score, per degradation family (answering "does the score rise appropriately as corruption gets worse?").
+
+### Outputs (entirely separate from `final_test` and `robustness`)
+
+Every invocation generates a fresh `run_id` (`ood_uncertainty_aa_evidentnet_seed<seed>_<timestamp>_<6-hex>`) and writes, only under its own directory — never inside `results/raw_predictions/`, `results/tables/<eval_run_id>/`, or `results/robustness/<robustness_run_id>/`:
+
+- `results/ood_uncertainty/<run_id>/metrics.csv` — one row per condition: `model, degradation, severity, n, accuracy, mean_edl_uncertainty, mean_ood_score, mean_combined_score, raw_mean_edl_uncertainty, raw_mean_ood_distance, edl_error_auroc, edl_error_auprc, ood_error_auroc, ood_error_auprc, combined_error_auroc, combined_error_auprc`.
+- `results/ood_uncertainty/<run_id>/selective_risk_coverage.csv` — selective risk/coverage (at `configs/evaluation.yaml: selective_prediction.coverage_levels`) for each of the three scores, computed on the **clean** test condition.
+- `results/ood_uncertainty/<run_id>/severity_vs_score.png` — one panel per degradation family, EDL vs. OOD vs. combined score across severities, with the clean-reference value as a dashed baseline.
+- `results/ood_uncertainty/<run_id>/metadata.json` — prototypes' per-class sample counts, both normalization ranges (and which manifest they were fit on), the full weight-grid search results and the chosen weight, the severity correlations, checkpoint/train/val/test manifest hashes, config paths + combined config hash, git commit, timestamp, and every output path above.
+
+### What `ood_uncertainty` deliberately does NOT do
+
+Retrain, tune, or modify AA-EvidentNet's weights; use `test_original.csv` for any calibration decision (prototypes, normalization, or weight selection — all three come from train/val only); touch `experiments/registry.csv`; overwrite or rerun `final_test`'s or `robustness`'s outputs; support any model other than `aa_evidentnet` (baselines are explicitly rejected).
+
 ## Repository structure
 
 ```text
@@ -1130,7 +1162,7 @@ src/
   statistics/        Multi-seed aggregation, significance testing
   utils/             Reproducibility utilities (seeding, config hashing, git/env info)
 experiments/         One directory per experiment stage (00_data_audit ... 08_robustness)
-results/             logs/, checkpoints/, raw_predictions/, tables/, figures/, robustness/ (all currently empty)
+results/             logs/, checkpoints/, raw_predictions/, tables/, figures/, robustness/, ood_uncertainty/ (all currently empty)
 paper/               figures/, tables/, supplementary/, references/ for the eventual write-up
 tests/               Unit tests for the utilities and CLI built so far
 run_pipeline.py      Single CLI entry point for all pipeline stages

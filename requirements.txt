@@ -17,8 +17,10 @@ scikit-learn==1.7.2
 # Dev / testing
 pytest==9.1.1
 
-# Anticipated for later tasks (visualization, progress bars); not required
-# by the current foundation code, listed here so later tasks don't need to
-# revisit this file for basic plotting/CLI needs.
-matplotlib
+# matplotlib==3.10.9: now actually required by
+# src/evaluation/ood_uncertainty.py (the severity-vs-score figure) -
+# installed and pinned here (was previously listed unpinned as
+# "anticipated for later tasks" without ever being installed in the
+# reference environment). tqdm remains anticipated/unused.
+matplotlib==3.10.9
 tqdm

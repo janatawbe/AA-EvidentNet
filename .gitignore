@@ -17,6 +17,7 @@ results/raw_predictions/*
 results/tables/*
 results/figures/*
 results/robustness/*
+results/ood_uncertainty/*
 !results/**/.gitkeep
 
 # Python

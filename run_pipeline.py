@@ -3,8 +3,8 @@
 
 This is the single entry point for the project's experiment pipeline.
 `audit`, `prepare_dataset`, `model_check`, `baseline`, `train`
-(AA-EvidentNet, Task 7 completion), `final_test` (Task 8), and
-`robustness` are implemented. Every other command (`ablation`,
+(AA-EvidentNet, Task 7 completion), `final_test` (Task 8), `robustness`,
+and `ood_uncertainty` are implemented. Every other command (`ablation`,
 `hard_pairs`, `calibration`, `selective`, `gradcam`, `multi_seed`,
 `publication`) is recognized by the CLI but not yet implemented, and
 fails with a clear NotImplementedError-derived message rather than doing
@@ -44,6 +44,7 @@ from src.data.generate_balanced_dataset import (  # noqa: E402
 )
 from src.evaluation.final_test import FinalTestError, run_final_test  # noqa: E402
 from src.evaluation.metrics import MetricsInputError  # noqa: E402
+from src.evaluation.ood_uncertainty import OODUncertaintyError, run_ood_uncertainty_evaluation  # noqa: E402
 from src.evaluation.robustness import RobustnessError, run_robustness_evaluation  # noqa: E402
 from src.losses.combined import CombinedObjectiveConfigError  # noqa: E402
 from src.losses.cs_supcon import CSSupConConfigError  # noqa: E402
@@ -84,6 +85,7 @@ DEFAULT_CONFIGS = {
     # convention (see run_robustness_evaluation's models_config_path param).
     "final_test": "configs/models.yaml",
     "robustness": "configs/models.yaml",
+    "ood_uncertainty": "configs/models.yaml",
 }
 
 
@@ -154,12 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
         ("multi_seed", "Aggregate results across the project's multi-seed runs."),
         ("publication", "Assemble publication-ready tables and figures."),
         ("final_test", "Run the final held-out test evaluation."),
+        ("ood_uncertainty", "Evaluate a feature-distance OOD score combined with EDL uncertainty (AA-EvidentNet only)."),
     ]
 
     for name, help_text in commands:
         sub = subparsers.add_parser(name, help=help_text, description=help_text)
         add_common_arguments(sub, name)
-        if name in ("baseline", "train", "final_test", "robustness"):
+        if name in ("baseline", "train", "final_test", "robustness", "ood_uncertainty"):
             sub.add_argument(
                 "--model",
                 type=str,
@@ -186,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
                 help="Path to a checkpoint (.pt) to resume training from.",
             )
-        if name in ("final_test", "robustness"):
+        if name in ("final_test", "robustness", "ood_uncertainty"):
             sub.add_argument(
                 "--checkpoint",
                 type=str,
@@ -367,6 +370,35 @@ def run_robustness_command(args: argparse.Namespace) -> None:
     )
 
 
+def run_ood_uncertainty_command(args: argparse.Namespace) -> None:
+    """python run_pipeline.py ood_uncertainty --model aa_evidentnet --checkpoint <path.pt>.
+
+    Combines a feature-distance (cosine, to the nearest train_original.csv
+    class prototype) OOD score with AA-EvidentNet's own EDL uncertainty
+    (src/evaluation/ood_uncertainty.py) - AA-EvidentNet only (baselines have
+    neither a fused embedding nor an evidential head). Calibrated entirely
+    from train_original.csv/val_original.csv, never from
+    test_original.csv; never trains, never tunes, never modifies the
+    checkpoint's weights; never overwrites final_test's or robustness's
+    outputs (results/ood_uncertainty/ is its own, separate directory).
+    """
+    summary = run_ood_uncertainty_evaluation(
+        model_name=args.model,
+        checkpoint_path=args.checkpoint,
+        dataset_config_path=args.dataset_config,
+        models_config_path=args.config,
+        seed=args.seed,
+        device_override=None if args.device == "auto" else args.device,
+        num_workers_override=args.num_workers,
+        batch_size_override=args.batch_size,
+    )
+    print(
+        f"[run_pipeline] ood_uncertainty_run_id={summary.run_id} model={summary.model_name} "
+        f"n={summary.num_test_samples} weight={summary.weight} metrics={summary.metrics_path} "
+        f"figure={summary.figure_path}"
+    )
+
+
 def dispatch(args: argparse.Namespace) -> None:
     command = args.command
 
@@ -385,6 +417,7 @@ def dispatch(args: argparse.Namespace) -> None:
         "multi_seed": lambda: not_implemented(command, "src/statistics (multi-seed aggregation)"),
         "publication": lambda: not_implemented(command, "src/visualization + src/statistics (publication assets)"),
         "final_test": lambda: run_final_test_command(args),
+        "ood_uncertainty": lambda: run_ood_uncertainty_command(args),
     }
 
     handlers[command]()
@@ -441,6 +474,9 @@ def main(argv=None) -> int:
         return 1
     except RobustnessError as e:
         print(f"[run_pipeline] ROBUSTNESS ERROR: {e}", file=sys.stderr)
+        return 1
+    except OODUncertaintyError as e:
+        print(f"[run_pipeline] OOD UNCERTAINTY ERROR: {e}", file=sys.stderr)
         return 1
 
     return 0

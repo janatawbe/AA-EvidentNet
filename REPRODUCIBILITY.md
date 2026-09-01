@@ -626,6 +626,145 @@ or rerun anything Task 8 produced.
   `test_original.csv`'s unchanged mtime and `data/raw/`'s unchanged file
   count (5,335) throughout this work.
 
+## Feature-distance OOD detector + EDL uncertainty reproducibility
+
+**Motivation**: the robustness evaluation above surfaced a failure mode -
+AA-EvidentNet's own EDL uncertainty *decreases* under severe Gaussian
+noise (std=0.10) even as accuracy collapses to ~13%. This module
+(`src/evaluation/ood_uncertainty.py`, `python run_pipeline.py
+ood_uncertainty --model aa_evidentnet --checkpoint <path>`) is a new
+evaluation component, AA-EvidentNet only, that never retrains, fine-tunes,
+or modifies the checkpoint's weights, and never overwrites anything
+`final_test.py` or `robustness.py` already produced. The current frozen
+final-test result (87.90% accuracy) is unaffected.
+
+- **Reuses, unmodified**: `AAEvidentNetOutput.embedding` (the same fused
+  global+local representation the classifier and EDL head already share -
+  no new forward path added to `src/models/aa_evidentnet.py`),
+  `src/evaluation/final_test.py: _effective_model_config`,
+  `src/evaluation/robustness.py: DEFAULT_DEGRADATION_SEVERITIES` /
+  `apply_degradation` / `CLEAN_REFERENCE_LABEL` / `_iter_conditions` (the
+  same 17 fixed degradation/severity combinations, not redefined here),
+  `src/training/checkpointing.py: load_checkpoint` /
+  `assert_checkpoint_compatible` / `restore_training_state`,
+  `src/data/dataset.py: RetinalDataset.from_manifest`. No optimizer, no
+  scheduler, no backward pass anywhere in this module; inference runs
+  under `torch.inference_mode()` in plain fp32, `model.eval()` called
+  before any forward pass - identical guarantees to `final_test`/
+  `robustness`.
+- **Calibration uses train_original.csv and val_original.csv ONLY - never
+  test_original.csv** for any decision:
+  1. `compute_class_prototypes`: one forward pass over `train_original.csv`
+     (the same manifest training already used), accumulating the mean
+     fused embedding per class. Raises `OODUncertaintyError` if any class
+     has zero training samples (a prototype is then genuinely undefined -
+     never fabricated as a zero vector).
+  2. One forward pass over `val_original.csv` computes, per sample: EDL
+     uncertainty, **cosine distance** (`nearest_prototype_cosine_distance`
+     - `1 - cosine_similarity`, L2-normalizing both the embedding and every
+     prototype internally, so the metric is scale-invariant) to the
+     nearest prototype, and whether the checkpoint's own prediction was
+     correct.
+  3. `_fit_minmax`/`_apply_minmax`: min-max normalization fit on
+     val_original's distribution of each raw signal (not train - train
+     samples define the prototypes, so their own distances are biased
+     low). `clip((x - min) / (max - min), 0, None)` - floored at 0, but
+     deliberately NOT capped above 1, so a severely out-of-distribution
+     test-time sample can push a normalized score arbitrarily high. A
+     degenerate (zero-span) fitted range normalizes every value to 0.0
+     rather than dividing by zero.
+  4. `select_combine_weight`: a fixed grid search
+     (`DEFAULT_WEIGHT_GRID = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]`,
+     mirrored in `configs/evaluation.yaml: ood_uncertainty.weight_grid`)
+     over `combined = normalized_edl + weight * normalized_ood`, choosing
+     whichever weight maximizes error-detection AUROC (is the checkpoint's
+     own prediction wrong?) computed entirely on val_original's own
+     predictions. Ties (including "AUROC undefined for every candidate")
+     are broken toward the smallest weight, since the grid is iterated in
+     ascending order and only a strict improvement replaces the current
+     best - deterministic and reproducible. The full per-candidate search
+     is always recorded in `metadata.json`, not just the winner.
+  Calibration is recomputed fresh on every invocation (cheap, deterministic,
+  no randomness) rather than cached to a separate artifact file, so every
+  run's `metadata.json` fully documents exactly how its numbers were
+  derived from that run's checkpoint + manifests.
+- **Frozen-method evaluation** (read-only, one-shot): the calibrated
+  method (prototypes + normalization + weight) is applied to clean
+  `test_original.csv` (the same `expected_split="test",
+  require_all_original=True` safeguard as `final_test`/`robustness`) and
+  to every robustness condition, computing per condition: accuracy; mean
+  EDL/OOD/combined score (both normalized and raw); error-detection
+  AUROC/AUPRC for all three scores (`None` when undefined, e.g. zero
+  errors in that condition - same convention as `metrics.py`); and
+  (`_compute_severity_correlations`) a Spearman rank correlation (computed
+  via pandas' tie-aware `.rank()` + `np.corrcoef`, not scipy, since pandas
+  is already a declared project dependency) between a monotonic
+  "corruption strength" convention and each score's mean, per degradation
+  family - `_corruption_strength`: `|factor - 1.0|` for brightness/contrast
+  (severities are symmetric around "no change"), the severity itself for
+  gaussian_noise/gaussian_blur (already monotonic), and `image_size -
+  target_size` for reduced_resolution (smaller target = more corruption).
+  This convention is used ONLY for the correlation analysis - it plays no
+  role in the actual degradation, normalization, or combination logic.
+  Selective risk/coverage (`_compute_risk_coverage`, at
+  `configs/evaluation.yaml: selective_prediction.coverage_levels`) is
+  computed on the clean condition only, for all three scores.
+- **Outputs are entirely separate from `final_test`'s and `robustness`'s**:
+  every invocation generates a fresh `run_id`
+  (`ood_uncertainty_aa_evidentnet_seed<seed>_<timestamp>_<6-hex>`, the same
+  `generate_run_id` mechanism every other run uses) and writes only to
+  `results/ood_uncertainty/<run_id>/` - never to `results/raw_predictions/`,
+  any `results/tables/<eval_run_id>/`, or `results/robustness/<robustness_run_id>/`:
+  `metrics.csv` (one row per condition), `selective_risk_coverage.csv`,
+  `severity_vs_score.png` (one panel per degradation family, EDL vs. OOD
+  vs. combined vs. severity, matplotlib `Agg` backend - headless-safe,
+  never opens a display), and `metadata.json` (prototype class counts,
+  both normalization ranges + which manifest each was fit on, the full
+  weight-grid search + chosen weight, severity correlations, checkpoint/
+  train/val/test manifest hashes, config paths + combined config hash, git
+  commit, timestamp, every output path). Two invocations never collide.
+  `experiments/registry.csv` is neither read nor written by this module.
+- **Rejects any model other than `aa_evidentnet`** with a clear
+  `OODUncertaintyError` (baselines have neither a fused embedding nor an
+  evidential head - there is nothing for this module to combine).
+- **matplotlib==3.10.9 is now an actual, installed, pinned dependency**
+  (`requirements.txt`/`environment.yml`) - it was previously listed
+  unpinned as "anticipated for later tasks" but never installed in the
+  reference environment; this is the first feature that actually needs it
+  (the severity-vs-score figure).
+- **45 new tests** (`tests/test_ood_uncertainty.py`), plus 3 dedicated CLI
+  tests in `tests/test_cli.py` (parser requires `--model`/`--checkpoint`,
+  `--config` defaults to `configs/models.yaml`, a non-`aa_evidentnet`
+  model is rejected with a nonzero exit code, and a full end-to-end run),
+  covering: cosine-distance correctness (identical/orthogonal/opposite/
+  scale-invariance/nearest-of-several), normalization fit/apply including
+  the degenerate zero-span case, error-detection AUROC/AUPRC undefined
+  cases, weight-grid selection (best-AUROC, tie-break-to-smallest,
+  fallback-to-smallest-when-all-undefined), the fixed default weight grid,
+  the corruption-strength convention per degradation family, Spearman
+  correlation edge cases, `compute_class_prototypes` correctness (checked
+  against an independently hand-computed per-class mean) and its
+  missing-class error, calibration proven to succeed with NO
+  `test_original.csv` present at all (direct proof of zero test
+  dependency), calibration's missing-train/missing-val errors, full
+  end-to-end schema/output-location checks, non-`aa_evidentnet` rejection,
+  missing/malformed test-manifest rejection (non-test split, augmented
+  sample), incompatible-checkpoint rejection, `model.eval()` called, no
+  optimizer ever constructed, no backward pass ever called, checkpoint/raw
+  image files/all three manifests verified byte-unchanged after a full
+  run, and non-colliding output directories. All tests use tiny synthetic
+  fixtures under `tmp_path` - **none run inference against the real
+  train/val/test manifests or `data/raw/`.**
+- **No real OOD/EDL inference was performed on the real train/val/test
+  manifests** as part of implementing or testing this feature - confirmed
+  by `test_original.csv`'s unchanged mtime and `data/raw/`'s unchanged
+  file count (5,335) throughout this work. The real, fully-trained
+  AA-EvidentNet checkpoint behind the 87.90% clean-test / 12.79%
+  noisy-robustness numbers lives on Colab, not in this local repo -
+  running this feature against it (to get real calibration numbers and a
+  real severity-vs-score figure) is a separate, later step for whoever
+  holds that checkpoint.
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.
