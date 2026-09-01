@@ -52,9 +52,44 @@ cs_supcon:
   ambiguity_weight: 2.0
   ambiguity_pairs:
     # Clinically motivated ambiguous/hard class pairs (see README.md).
+    # Preserved unchanged for comparison/ablation against the new learned
+    # mechanism below - never silently deleted or replaced.
     - ["Healthy", "Glaucoma"]
     - ["Disc Edema", "Glaucoma"]
     - ["Diabetic Retinopathy", "Central Serous Chorioretinopathy"]
+
+  # ---------------------------------------------------------------------
+  # Learned class-level ambiguity (feature/learned-ambiguity, Phase 1).
+  #
+  # `ambiguity_source` selects how the per-pair negative weight in
+  # CS-SupCon is determined (see src/losses/ambiguity.py and
+  # src/losses/cs_supcon.py for the exact math):
+  #   - "fixed_pairs" (default): the ambiguity_weight/ambiguity_pairs
+  #     above, EXACTLY as before this field existed. An existing
+  #     configs/losses.yaml with no `ambiguity_source` key at all parses
+  #     to this same default - zero behavior change unless reconfigured.
+  #   - "learned_class": w(i,a) = 1 + ambiguity_scale * A[y_i, y_a], where
+  #     A is a FROZEN, non-trainable K x K matrix built once, before
+  #     training begins, from an existing reference AA-EvidentNet
+  #     checkpoint's embeddings over train_original.csv only (see
+  #     src/training/ambiguity_setup.py) - never from validation or test
+  #     data, never updated during the new training run.
+  #
+  # `ambiguity_scale` is PROVISIONAL, not tuned from any observed result -
+  # 1.0 was chosen so that a class pair with maximal learned ambiguity
+  # (A[a,b]=1) receives the same weight (2.0) the existing
+  # ambiguity_weight default already uses for a fixed hard pair, keeping
+  # the two mechanisms' magnitudes directly comparable.
+  #
+  # NOTE: "learned_class_sample" (letting each anchor's OWN sample-level
+  # ambiguity further modulate this weight) is intentionally NOT a valid
+  # value yet - sample-level ambiguity is analysis-only in this phase
+  # (src/evaluation/ambiguity_validation.py); it does not influence
+  # training. Setting ambiguity_source to that string raises a clear
+  # "not implemented in this phase" error rather than being silently
+  # accepted or ignored.
+  ambiguity_source: fixed_pairs
+  ambiguity_scale: 1.0
 
 # ---------------------------------------------------------------------------
 # EDL: Evidential Deep Learning (Task 9).

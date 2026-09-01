@@ -91,6 +91,9 @@ from src.evaluation.robustness import (
     apply_degradation,
 )
 from src.models.factory import create_model
+from src.models.prototypes import PrototypeComputationError
+from src.models.prototypes import compute_class_prototypes as _shared_compute_class_prototypes
+from src.models.prototypes import nearest_prototype_cosine_distance as _shared_nearest_prototype_cosine_distance
 from src.training.checkpointing import (
     assert_checkpoint_compatible,
     load_checkpoint,
@@ -184,31 +187,23 @@ def _resolve_num_workers(device: torch.device, num_workers_override: Optional[in
     return config_num_workers
 
 
-def _l2_normalize_rows(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    norms = np.linalg.norm(x, axis=1, keepdims=True)
-    return x / np.clip(norms, eps, None)
-
-
 def nearest_prototype_cosine_distance(embeddings: np.ndarray, prototypes: np.ndarray) -> np.ndarray:
     """Cosine distance (`1 - cosine_similarity`) from each row of
     `embeddings` [N, D] to its NEAREST row of `prototypes` [K, D] (i.e. the
     minimum distance across all K class prototypes). Neither array needs
     to be pre-normalized - L2-normalization happens here. Returns an
     [N]-shaped array in [0, 2] (0 = identical direction, 2 = opposite
-    direction)."""
-    if embeddings.ndim != 2:
-        raise OODUncertaintyError(f"embeddings must be 2-D [N, D], got shape {embeddings.shape}")
-    if prototypes.ndim != 2:
-        raise OODUncertaintyError(f"prototypes must be 2-D [K, D], got shape {prototypes.shape}")
-    if embeddings.shape[1] != prototypes.shape[1]:
-        raise OODUncertaintyError(
-            f"embedding dim {embeddings.shape[1]} != prototype dim {prototypes.shape[1]}"
-        )
-    embeddings_unit = _l2_normalize_rows(embeddings.astype(np.float64))
-    prototypes_unit = _l2_normalize_rows(prototypes.astype(np.float64))
-    similarity = embeddings_unit @ prototypes_unit.T  # [N, K]
-    distance = 1.0 - similarity
-    return distance.min(axis=1)
+    direction).
+
+    Thin wrapper around the shared implementation
+    (src/models/prototypes.py, also used by src/losses/ambiguity.py) -
+    re-raises PrototypeComputationError as OODUncertaintyError so this
+    module's existing error-handling contract (and every existing test
+    asserting on it) is unchanged."""
+    try:
+        return _shared_nearest_prototype_cosine_distance(embeddings, prototypes)
+    except PrototypeComputationError as e:
+        raise OODUncertaintyError(str(e)) from e
 
 
 def _fit_minmax(values: np.ndarray) -> NormalizationParams:
@@ -282,38 +277,17 @@ def compute_class_prototypes(
     the mean fused embedding (`AAEvidentNetOutput.embedding`) per class.
     Raises OODUncertaintyError if any of the `num_classes` classes has zero
     samples in this loader - a prototype is then genuinely undefined,
-    never silently fabricated as a zero vector."""
-    sums: Optional[np.ndarray] = None
-    counts = np.zeros(num_classes, dtype=np.int64)
+    never silently fabricated as a zero vector.
 
-    with torch.inference_mode():
-        for batch in loader:
-            images = batch["image"].to(device)
-            labels = batch["label"]
-            labels_np = labels.detach().cpu().numpy() if torch.is_tensor(labels) else np.asarray(labels)
-
-            output = model(images, return_features=True)
-            embeddings = output.embedding.detach().cpu().numpy()
-            if sums is None:
-                sums = np.zeros((num_classes, embeddings.shape[1]), dtype=np.float64)
-
-            for i in range(embeddings.shape[0]):
-                class_idx = int(labels_np[i])
-                sums[class_idx] += embeddings[i]
-                counts[class_idx] += 1
-
-    if sums is None:
-        raise OODUncertaintyError("train_original.csv produced zero batches - cannot compute class prototypes")
-
-    missing = [k for k in range(num_classes) if counts[k] == 0]
-    if missing:
-        raise OODUncertaintyError(
-            f"train_original.csv has zero samples for class index/es {missing} - a prototype is undefined for "
-            "these classes; refusing to fabricate one"
-        )
-
-    prototypes = sums / counts[:, None]
-    return prototypes, counts.tolist()
+    Thin wrapper around the shared implementation
+    (src/models/prototypes.py, also used by src/losses/ambiguity.py) -
+    re-raises PrototypeComputationError as OODUncertaintyError so this
+    module's existing error-handling contract (and every existing test
+    asserting on it) is unchanged."""
+    try:
+        return _shared_compute_class_prototypes(model, loader, device, num_classes)
+    except PrototypeComputationError as e:
+        raise OODUncertaintyError(str(e)) from e
 
 
 def calibrate_ood_uncertainty(
