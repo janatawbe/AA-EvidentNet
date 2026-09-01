@@ -16,6 +16,7 @@ results/checkpoints/*
 results/raw_predictions/*
 results/tables/*
 results/figures/*
+results/robustness/*
 !results/**/.gitkeep
 
 # Python

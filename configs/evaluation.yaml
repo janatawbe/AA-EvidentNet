@@ -1,11 +1,11 @@
 # Evaluation configuration.
 #
-# `final_test` (Task 8, src/evaluation/final_test.py) is implemented and
-# uses `final_test:` and `output_paths:` below. Calibration, selective
-# prediction, and robustness remain schema-only placeholders for later
-# tasks - nothing reads `calibration:`/`selective_prediction:`/
-# `robustness:` yet. Thresholds/bin counts under those sections are
-# PROVISIONAL defaults, not yet used by any code.
+# `final_test` (Task 8, src/evaluation/final_test.py) and `robustness`
+# (src/evaluation/robustness.py) are implemented and use their own
+# sections + `output_paths:` below. Calibration and selective prediction
+# remain schema-only placeholders for later tasks - nothing reads
+# `calibration:`/`selective_prediction:` yet. Thresholds/bin counts under
+# those two sections are PROVISIONAL defaults, not yet used by any code.
 
 seed: 42
 
@@ -49,9 +49,23 @@ selective_prediction:
   # PROVISIONAL coverage sweep for risk-coverage curves.
   coverage_levels: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
 
+# Robustness evaluation (src/evaluation/robustness.py): degrades already-
+# loaded test images IN MEMORY (never data/raw/, never test_original.csv)
+# and re-evaluates each already-frozen checkpoint. `degradations` below
+# are FIXED, predefined severities - NOT tuned from any observed test
+# result; changing these after seeing a robustness number would defeat
+# the purpose of a robustness check. batch_size/num_workers are the same
+# kind of inference-only, results-independent knobs as `final_test:`
+# above (see its comment - identical reasoning applies here).
 robustness:
-  # PROVISIONAL perturbation set for stress-testing.
-  perturbations: [gaussian_noise, brightness, contrast, blur, jpeg_compression]
+  batch_size: 16
+  num_workers: 2
+  degradations:
+    brightness: [0.70, 0.85, 1.15, 1.30]
+    contrast: [0.70, 0.85, 1.15, 1.30]
+    gaussian_noise: [0.02, 0.05, 0.10]  # std dev, image values in [0,1] before normalization
+    gaussian_blur: [0.5, 1.0, 2.0]      # sigma
+    reduced_resolution: [168, 112, 56]  # downsample to NxN then restore to the configured image size
 
 statistics:
   multi_seed_seeds: [42, 123, 456, 789, 2026]
@@ -62,3 +76,7 @@ output_paths:
   tables_dir: results/tables
   figures_dir: results/figures
   raw_predictions_dir: results/raw_predictions
+  # Deliberately separate from raw_predictions_dir/tables_dir above -
+  # robustness outputs must never land in, overwrite, or be confused with
+  # Task 8's clean final-test outputs.
+  robustness_dir: results/robustness

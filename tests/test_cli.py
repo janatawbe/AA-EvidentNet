@@ -22,9 +22,9 @@ from tests.conftest import make_image, make_invalid_image, write_min_dataset_con
 # test_main_audit_command_*, test_main_prepare_dataset_command_*, and
 # test_main_model_check_command_* below); every other command in this list
 # is still recognized by the parser but not yet implemented. "baseline",
-# "train" (MODEL_COMMANDS below), and "final_test" (Task 8, its own
-# dedicated tests below - it requires --model AND --checkpoint, so it
-# doesn't fit this bare-command parametrization) are also implemented but
+# "train" (MODEL_COMMANDS below), "final_test", and "robustness" (their own
+# dedicated tests below - both require --model AND --checkpoint, so they
+# don't fit this bare-command parametrization) are also implemented but
 # excluded from this list for the same reason.
 ALL_COMMANDS = [
     "audit",
@@ -35,7 +35,6 @@ ALL_COMMANDS = [
     "calibration",
     "selective",
     "gradcam",
-    "robustness",
     "multi_seed",
     "publication",
 ]
@@ -408,6 +407,105 @@ def test_main_final_test_command_end_to_end(tmp_path):
     exit_code = run_pipeline.main(
         [
             "final_test",
+            "--model", "resnet50",
+            "--checkpoint", str(checkpoint_path),
+            "--dataset-config", str(dataset_config_path),
+            "--config", str(models_config_path),
+            "--device", "cpu",
+            "--num-workers", "0",
+        ]
+    )
+    assert exit_code == 0
+
+
+# --- "robustness" is implemented: requires --model AND --checkpoint (same
+# shape as "final_test" above), so it also needs its own dedicated tests
+# rather than fitting ALL_COMMANDS/MODEL_COMMANDS. Uses a tiny synthetic
+# fixture dataset/checkpoint and a tmp_path-scoped evaluation.yaml (a
+# reduced 1-condition degradation table, purely to keep this CLI smoke test
+# fast) - never touches the real data/manifests/test_original.csv or the
+# real configs/evaluation.yaml's full severity table. ---
+
+
+def test_parser_robustness_requires_model_and_checkpoint():
+    parser = run_pipeline.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["robustness"])  # missing both --model and --checkpoint
+    with pytest.raises(SystemExit):
+        parser.parse_args(["robustness", "--model", "resnet50"])  # missing --checkpoint
+
+
+def test_parser_robustness_config_defaults_to_models_yaml():
+    parser = run_pipeline.build_parser()
+    args = parser.parse_args(["robustness", "--model", "resnet50", "--checkpoint", "x.pt"])
+    assert args.config == "configs/models.yaml"
+
+
+def test_main_robustness_command_end_to_end(tmp_path):
+    import yaml
+
+    from src.models.factory import create_model
+    from src.training.checkpointing import build_checkpoint, save_checkpoint
+    from tests.conftest import make_image, write_min_dataset_config, write_min_models_config
+
+    canonical_classes = ["Alpha", "Beta", "Gamma"]
+    raw_dir = tmp_path / "raw"
+    audit_dir = tmp_path / "audit"
+    mapping = {name: name for name in canonical_classes}
+    dataset_config_path = write_min_dataset_config(tmp_path, mapping, raw_dir, audit_dir)
+    models_config_path = write_min_models_config(tmp_path, num_classes=len(canonical_classes))
+
+    manifests_dir = tmp_path / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for name in canonical_classes:
+        make_image(raw_dir / name / f"{name}.jpg")
+        rows.append(
+            {
+                "path": f"{name}/{name}.jpg",
+                "class": name,
+                "split": "test",
+                "original_id": f"id_{name}",
+                "parent_original_id": f"id_{name}",
+                "is_original": "true",
+                "augmentation_type": "original",
+            }
+        )
+    import csv
+
+    with open(manifests_dir / "test_original.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["path", "class", "split", "original_id", "parent_original_id", "is_original", "augmentation_type"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    import torch
+
+    models_config = yaml.safe_load(models_config_path.read_text(encoding="utf-8"))
+    model = create_model("resnet50", models_config)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    checkpoint = build_checkpoint(
+        model=model, optimizer=optimizer, scheduler=None, epoch=1, best_metric=0.5, monitor_metric="val_macro_f1",
+        training_config={}, seed=42, model_name="resnet50", architecture=model.architecture,
+        num_classes=len(canonical_classes), dataset_manifest_hash="h", git_commit="c",
+    )
+    checkpoint_dir = tmp_path / "checkpoints" / "cli_robustness_test_run"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint_path = checkpoint_dir / "best.pt"
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    # run_robustness_evaluation's evaluation_config_path is not CLI-
+    # overridable (same convention as final_test's evaluation_config_path),
+    # so this end-to-end CLI invocation necessarily uses the real
+    # configs/evaluation.yaml (full severity table) and writes into the
+    # real results/robustness/<robustness_run_id>/ directory - a fresh,
+    # uniquely-timestamped subdirectory that never collides with or
+    # overwrites anything, exactly like test_main_final_test_command_end_to_end
+    # above already does for results/tables/ and results/raw_predictions/.
+    exit_code = run_pipeline.main(
+        [
+            "robustness",
             "--model", "resnet50",
             "--checkpoint", str(checkpoint_path),
             "--dataset-config", str(dataset_config_path),

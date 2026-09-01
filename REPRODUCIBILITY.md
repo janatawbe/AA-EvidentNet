@@ -512,6 +512,120 @@ numbers in context, not as a single global sequence.
   unchanged mtime and `data/raw/`'s unchanged file count (5,335)
   throughout this work.
 
+## Robustness evaluation reproducibility
+
+**Naming note**: same caveat as the "Final test evaluation reproducibility
+(Task 8)" section above — this feature was requested and implemented as
+its own, separately-scoped unit of work (not tied to a single task number
+in either numbering scheme). It is a later, additional test-time analysis
+on top of Task 8's already-frozen checkpoints; it does not replace, modify,
+or rerun anything Task 8 produced.
+
+- `src/evaluation/robustness.py: run_robustness_evaluation` (CLI: `python
+  run_pipeline.py robustness --model <name> --checkpoint <path>`)
+  evaluates a single already-frozen checkpoint (any of the four registered
+  models) against fixed, predefined image degradations. Reuses,
+  unmodified: `src/evaluation/final_test.py: ALL_MODEL_NAMES` /
+  `_effective_model_config`, `src/evaluation/metrics.py:
+  compute_overall_metrics`, `src/models/factory.py: create_model`,
+  `src/training/checkpointing.py: load_checkpoint` /
+  `assert_checkpoint_compatible` / `restore_training_state`,
+  `src/data/dataset.py: RetinalDataset.from_manifest(...,
+  expected_split="test", require_all_original=True)`, and
+  `src/data/dataloaders.py: build_eval_dataloader`. No optimizer, no
+  scheduler, and no backward pass anywhere in this module; inference runs
+  under `torch.inference_mode()` in plain fp32 (no AMP), and `model.eval()`
+  is called before any forward pass — identical guarantees to `final_test`.
+- **Test-manifest handling**: `robustness` is the one other place in the
+  codebase (besides `final_test` and its own tests) that reads
+  `data/manifests/test_original.csv`, using the identical safeguard
+  (`expected_split="test"`, `require_all_original=True`). It is never used
+  for training, model selection, hyperparameter tuning, calibration
+  fitting, or threshold selection. `data/raw/` and `test_original.csv` are
+  opened strictly read-only and are never modified — verified in
+  `tests/test_robustness.py` by hashing every raw image file and the
+  manifest before and after a full evaluation run.
+- **Degradations applied in memory only**: each degradation is applied to
+  an already resized/center-cropped/`ToTensor`'d `[0,1]` image tensor
+  (`src/data/transforms.py: build_pre_normalize_transform`, a new,
+  additive, behavior-preserving refactor of the module's existing
+  `_build_transform` — `tests/test_transforms.py`'s original 10 tests
+  still pass unchanged, confirming no existing transform behavior
+  changed), strictly before normalization (`normalize_tensor`, applied
+  explicitly afterward). Fixed, predefined severities
+  (`DEFAULT_DEGRADATION_SEVERITIES`, mirrored in `configs/evaluation.yaml:
+  robustness.degradations`):
+  - `brightness`: 0.70, 0.85, 1.15, 1.30 (`torchvision.transforms.functional.adjust_brightness`)
+  - `contrast`: 0.70, 0.85, 1.15, 1.30 (`adjust_contrast`)
+  - `gaussian_noise`: 0.02, 0.05, 0.10 (std dev in `[0,1]` pixel space)
+  - `gaussian_blur`: 0.5, 1.0, 2.0 (sigma; kernel size `2*ceil(3*sigma)+1`)
+  - `reduced_resolution`: downsample to 168, 112, or 56 px, then bilinear-upsample back to the configured image size (224)
+  Severities are never tuned from an observed result — changing them after
+  seeing a robustness number would defeat the purpose of the check.
+- **Deterministic Gaussian noise**: `torch.Generator().manual_seed(...)`
+  seeded from the first 8 hex digits of `sha256(f"{eval_seed}:{sample_id}:gaussian_noise:{severity}")`
+  — reruns with the same evaluation seed draw byte-identical noise for the
+  same sample at the same severity, independent of batch order, device, or
+  `num_workers`. Verified in `tests/test_robustness.py` (same
+  seed/sample/severity → identical output; different sample, severity, or
+  base seed → different output).
+- **Metrics** (per `model`/`degradation`/`severity`, via the same
+  `compute_overall_metrics` `final_test` uses): `accuracy`,
+  `balanced_accuracy`, `macro_f1`; AA-EvidentNet additionally reports
+  `mean_uncertainty` (mean of the model's own per-sample evidential
+  uncertainty, `K / sum(alpha)`, read directly from `AAEvidentNetOutput` —
+  never recomputed with a different formulation), left blank for the
+  three baselines. An optional `clean_reference` row (undegraded
+  inference, computed internally within the same run) is included by
+  default for same-run comparison — it never reads from or writes to
+  Task 8's own clean `final_test` outputs.
+- **Outputs are entirely separate from Task 8's**: every invocation
+  generates a fresh `robustness_run_id`
+  (`robustness_<model>_seed<seed>_<timestamp>_<6-hex>`, the same
+  `generate_run_id` mechanism training/`final_test` already use) and
+  writes only to `results/robustness/<robustness_run_id>/` — never to
+  `results/raw_predictions/` or any `results/tables/<eval_run_id>/`:
+  `robustness_metrics.csv` (columns: `model, degradation, severity, n,
+  accuracy, balanced_accuracy, macro_f1, mean_uncertainty`) and
+  `metadata.json` (model name/architecture, the checkpoint's inferred
+  training `run_id`, training seed and eval invocation seed, checkpoint
+  path + SHA-256, checkpoint's saved epoch/monitor-metric/best-metric,
+  test manifest path + SHA-256, exact class-name ordering, sample count,
+  device, the full degradation/severity table actually used, dataset/
+  models/evaluation config paths + a combined config hash, git commit,
+  timestamp, and every output path). Two invocations never collide.
+- **Registry is never touched**: unlike `final_test`, `robustness` does
+  not call `register_run()` or `update_run()` at all — `experiments/
+  registry.csv` is neither read nor written by this module.
+- **45 new tests** (`tests/test_robustness.py`), plus 3 dedicated CLI
+  parsing/dispatch tests in `tests/test_cli.py`, covering: shape/range
+  preservation for every one of the 17 required degradation/severity
+  combinations, rejection of unknown degradations and of severities
+  outside the fixed table, rejection of a malformed (non-`[C,H,W]`)
+  image tensor, deterministic Gaussian noise (same inputs -> identical
+  output; different sample/severity/seed -> different output), raw image
+  files and the test manifest verified byte-unchanged after a full
+  evaluation, test-manifest safeguard enforcement (non-test-split and
+  augmented-sample rejection, missing-manifest error), unknown-model and
+  incompatible-checkpoint rejection, `model.eval()` called, no optimizer
+  ever constructed, no backward pass ever called, outputs verified under
+  `results/robustness/` and never under `results/raw_predictions/`,
+  metrics-schema and row-count checks, AA-EvidentNet `mean_uncertainty`
+  populated vs. baseline `mean_uncertainty` blank, `clean_reference`
+  row present/absent per `include_clean_reference`, non-colliding output
+  directories, and CLI dispatch. All tests use tiny synthetic fixtures
+  under `tmp_path` (most with a reduced 1-2-condition degradation table
+  purely to keep runtime fast) — **none run inference against the real
+  438-image `data/manifests/test_original.csv`.** A dedicated test
+  (`test_real_config_and_defaults_use_exact_required_severities`)
+  separately confirms the real `configs/evaluation.yaml` and
+  `DEFAULT_DEGRADATION_SEVERITIES` both carry the exact, unmodified
+  required severities.
+- **No real robustness inference was performed on `test_original.csv`**
+  as part of implementing or testing this feature — confirmed by
+  `test_original.csv`'s unchanged mtime and `data/raw/`'s unchanged file
+  count (5,335) throughout this work.
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.

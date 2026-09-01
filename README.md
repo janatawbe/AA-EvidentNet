@@ -1064,7 +1064,52 @@ After a **successful** evaluation, `final_test` looks up the checkpoint's inferr
 
 ### What Task 8 deliberately does NOT do
 
-Compute bootstrap confidence intervals, McNemar tests, hard-pair analysis, ECE/Brier/reliability diagrams, selective-referral risk-coverage curves, Grad-CAM, or robustness perturbations — all of that is later-task work. Task 8's job is only to preserve, per sample, everything those later analyses will need (the full logits/probabilities/evidential outputs above) so none of them ever require rerunning clean test inference.
+Compute bootstrap confidence intervals, McNemar tests, hard-pair analysis, ECE/Brier/reliability diagrams, selective-referral risk-coverage curves, Grad-CAM, or robustness perturbations (robustness is now implemented separately — see "Robustness evaluation" below — but as its own module that never modifies anything Task 8 produced) — everything else in this list is still later-task work. Task 8's job is only to preserve, per sample, everything those later analyses will need (the full logits/probabilities/evidential outputs above) so none of them ever require rerunning clean test inference.
+
+## Robustness evaluation (`src/evaluation/robustness.py`)
+
+**A separate, additional test-time analysis on top of already-frozen, already-finally-tested checkpoints.** It never reads, writes, modifies, or reruns anything Task 8's `final_test` already produced (`results/raw_predictions/`, any existing `results/tables/<eval_run_id>/`, or `experiments/registry.csv` — `robustness` never registers or updates a registry row at all). It reuses `final_test.py`'s frozen-model-loading helpers (`ALL_MODEL_NAMES`, `_effective_model_config`) and `metrics.py`'s `compute_overall_metrics` without modifying either file.
+
+### What `robustness` does
+
+```bash
+python run_pipeline.py robustness --model <name> --checkpoint <path/to/best.pt> [--device auto|cpu|cuda] [--num-workers N] [--batch-size N] [--dataset-config PATH] [--config PATH] [--seed N]
+```
+
+- `--model`: one of `resnet50`, `efficientnetb0`, `maxvit`, `aa_evidentnet` (same `ALL_MODEL_NAMES` as `final_test`).
+- `--checkpoint`: path to the **frozen** checkpoint to evaluate — loaded via the same `load_checkpoint`/`assert_checkpoint_compatible`/`restore_training_state` utilities as `final_test`, never modified.
+- `--config` (default `configs/models.yaml`, the model architecture config — same convention as `final_test`), `--dataset-config` (default `configs/dataset.yaml`), `--seed`, `--batch-size`, `--num-workers`, `--device` are also accepted.
+- Reads `data/manifests/test_original.csv` — the same file `final_test` uses, and the same exception the project makes to its usual "never read the test manifest outside `final_test`" rule, since this is explicitly an additional test-time analysis. Loaded via the identical safeguard: `RetinalDataset.from_manifest(..., expected_split="test", require_all_original=True)`. `data/raw/` and `test_original.csv` are opened strictly read-only; neither is ever written to.
+- Inference is `model.eval()` + `torch.inference_mode()`, plain fp32, no optimizer is ever constructed, no backward pass ever occurs — identical guarantees to `final_test`.
+
+### Degradations (fixed, predefined severities — never tuned from an observed result)
+
+| Degradation | Severities | Notes |
+|---|---|---|
+| `brightness` | 0.70, 0.85, 1.15, 1.30 | `torchvision.transforms.functional.adjust_brightness` factor |
+| `contrast` | 0.70, 0.85, 1.15, 1.30 | `adjust_contrast` factor |
+| `gaussian_noise` | 0.02, 0.05, 0.10 | std dev added in `[0,1]` pixel space, before normalization; deterministic per `(seed, sample_id, severity)` |
+| `gaussian_blur` | 0.5, 1.0, 2.0 | sigma, kernel size `2*ceil(3*sigma)+1` |
+| `reduced_resolution` | 168, 112, 56 | bilinear downsample to N×N, then bilinear upsample back to the configured image size (224) |
+
+Defined once as `src/evaluation/robustness.py: DEFAULT_DEGRADATION_SEVERITIES` and mirrored exactly in `configs/evaluation.yaml: robustness.degradations` (same config-driven convention as `src/losses/cs_supcon.py: DEFAULT_TEMPERATURE`). Every degradation is applied to an already resized/center-cropped/`ToTensor`'d `[0,1]` image tensor (`src/data/transforms.py: build_pre_normalize_transform`), strictly **before** `T.Normalize` (`normalize_tensor`, applied explicitly afterward) — never on a raw PIL image, never on an already-normalized tensor. Gaussian noise uses a `torch.Generator` seeded from a SHA-256 hash of `(eval seed, sample_id, severity)`, so reruns with the same seed draw byte-identical noise for the same sample, independent of batch order, device, or `num_workers`.
+
+An optional `clean_reference` row (undegraded inference on the same 438 images, computed internally within this run) is included by default (`include_clean_reference=True`) purely as a same-run baseline for comparison — it is **not** a substitute for, and never touches, Task 8's own clean `final_test` outputs.
+
+### Metrics and outputs
+
+Per `(model, degradation, severity)`: `accuracy`, `balanced_accuracy`, `macro_f1` (via the same `compute_overall_metrics` `final_test` uses); AA-EvidentNet additionally reports `mean_uncertainty` (mean of the model's own per-sample evidential uncertainty, `K / sum(alpha)`) — left blank for the three baselines, which have no evidential head.
+
+Every invocation generates a fresh `robustness_run_id` (`robustness_<model>_seed<seed>_<timestamp>_<6-hex>`, via the same `generate_run_id` as training/`final_test`) and writes, entirely under its own directory — never inside `results/raw_predictions/` or any `results/tables/<eval_run_id>/`:
+
+- `results/robustness/<robustness_run_id>/robustness_metrics.csv` — one row per condition, columns `model, degradation, severity, n, accuracy, balanced_accuracy, macro_f1, mean_uncertainty`.
+- `results/robustness/<robustness_run_id>/metadata.json` — model name/architecture, the checkpoint's inferred training `run_id`, checkpoint SHA-256, checkpoint epoch/monitor metric/best metric, test manifest path + SHA-256, class-name ordering, sample count, seed, device, the full degradation/severity table used, config paths + combined config hash, git commit, timestamp, and output paths.
+
+Two invocations never collide (each gets its own timestamped directory), exactly like `final_test`.
+
+### What `robustness` deliberately does NOT do
+
+Retrain, tune, or modify any checkpoint's weights; touch `experiments/registry.csv`; overwrite or rerun Task 8's clean final-test outputs; compute Grad-CAM, calibration (ECE/Brier), or selective-prediction curves — those remain separate, later-task work.
 
 ## Repository structure
 
@@ -1085,7 +1130,7 @@ src/
   statistics/        Multi-seed aggregation, significance testing
   utils/             Reproducibility utilities (seeding, config hashing, git/env info)
 experiments/         One directory per experiment stage (00_data_audit ... 08_robustness)
-results/             logs/, checkpoints/, raw_predictions/, tables/, figures/ (all currently empty)
+results/             logs/, checkpoints/, raw_predictions/, tables/, figures/, robustness/ (all currently empty)
 paper/               figures/, tables/, supplementary/, references/ for the eventual write-up
 tests/               Unit tests for the utilities and CLI built so far
 run_pipeline.py      Single CLI entry point for all pipeline stages

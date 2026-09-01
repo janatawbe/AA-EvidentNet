@@ -19,6 +19,7 @@ weights.
 
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+import torch
 import torchvision.transforms as T
 
 DEFAULT_IMAGE_SIZE = 224
@@ -27,12 +28,30 @@ DEFAULT_NORMALIZE_MEAN = [0.485, 0.456, 0.406]
 DEFAULT_NORMALIZE_STD = [0.229, 0.224, 0.225]
 
 
+def build_pre_normalize_transform(image_size: int = DEFAULT_IMAGE_SIZE, resize_size: int = DEFAULT_RESIZE_SIZE) -> T.Compose:
+    """Resize + center-crop + ToTensor only -- deliberately NO
+    normalization. Used by src/evaluation/robustness.py to apply an
+    in-memory degradation in [0,1] pixel-value space (after the same
+    resize/crop every other transform in this module uses, before
+    normalization), never on raw PIL images and never after
+    normalization. `_build_transform` below composes this with
+    `T.Normalize` to produce the exact same transform it always has."""
+    return T.Compose([T.Resize(resize_size), T.CenterCrop(image_size), T.ToTensor()])
+
+
+def normalize_tensor(tensor: torch.Tensor, normalize_mean: Sequence[float], normalize_std: Sequence[float]) -> torch.Tensor:
+    """Apply the same normalization `_build_transform` always has, as a
+    standalone step on an already-resized/cropped/ToTensor'd [0,1] tensor.
+    Used by src/evaluation/robustness.py to normalize AFTER applying an
+    in-memory degradation, so a degraded sample is normalized identically
+    to how a clean sample already would be."""
+    return T.functional.normalize(tensor, mean=list(normalize_mean), std=list(normalize_std))
+
+
 def _build_transform(image_size: int, resize_size: int, normalize_mean: Sequence[float], normalize_std: Sequence[float]) -> T.Compose:
     return T.Compose(
         [
-            T.Resize(resize_size),
-            T.CenterCrop(image_size),
-            T.ToTensor(),
+            build_pre_normalize_transform(image_size, resize_size),
             T.Normalize(mean=list(normalize_mean), std=list(normalize_std)),
         ]
     )

@@ -2,12 +2,13 @@
 """AA-EvidentNet pipeline CLI.
 
 This is the single entry point for the project's experiment pipeline.
-`audit`, `prepare_dataset`, `model_check`, `baseline`, and `train`
-(AA-EvidentNet, Task 7 completion) are implemented. Every other command
-(`ablation`, `hard_pairs`, `calibration`, `selective`, `gradcam`,
-`robustness`, `multi_seed`, `publication`, `final_test`) is recognized by
-the CLI but not yet implemented, and fails with a clear
-NotImplementedError-derived message rather than doing nothing silently.
+`audit`, `prepare_dataset`, `model_check`, `baseline`, `train`
+(AA-EvidentNet, Task 7 completion), `final_test` (Task 8), and
+`robustness` are implemented. Every other command (`ablation`,
+`hard_pairs`, `calibration`, `selective`, `gradcam`, `multi_seed`,
+`publication`) is recognized by the CLI but not yet implemented, and
+fails with a clear NotImplementedError-derived message rather than doing
+nothing silently.
 
 Usage:
     python run_pipeline.py <command> [options]
@@ -43,6 +44,7 @@ from src.data.generate_balanced_dataset import (  # noqa: E402
 )
 from src.evaluation.final_test import FinalTestError, run_final_test  # noqa: E402
 from src.evaluation.metrics import MetricsInputError  # noqa: E402
+from src.evaluation.robustness import RobustnessError, run_robustness_evaluation  # noqa: E402
 from src.losses.combined import CombinedObjectiveConfigError  # noqa: E402
 from src.losses.cs_supcon import CSSupConConfigError  # noqa: E402
 from src.losses.evidential import EvidentialConfigError  # noqa: E402
@@ -69,7 +71,6 @@ DEFAULT_CONFIGS = {
     "calibration": "configs/evaluation.yaml",
     "selective": "configs/evaluation.yaml",
     "gradcam": "configs/evaluation.yaml",
-    "robustness": "configs/evaluation.yaml",
     "multi_seed": "configs/experiments.yaml",
     "publication": "configs/experiments.yaml",
     # models.yaml, not evaluation.yaml: --config here selects the model
@@ -79,8 +80,10 @@ DEFAULT_CONFIGS = {
     # own fixed default (src/evaluation/final_test.py:
     # evaluation_config_path) - it is not CLI-overridable, since Task 8
     # did not ask for that and the existing --config flag is already
-    # spoken for by models.yaml here.
+    # spoken for by models.yaml here. robustness.py follows the identical
+    # convention (see run_robustness_evaluation's models_config_path param).
     "final_test": "configs/models.yaml",
+    "robustness": "configs/models.yaml",
 }
 
 
@@ -156,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in commands:
         sub = subparsers.add_parser(name, help=help_text, description=help_text)
         add_common_arguments(sub, name)
-        if name in ("baseline", "train", "final_test"):
+        if name in ("baseline", "train", "final_test", "robustness"):
             sub.add_argument(
                 "--model",
                 type=str,
@@ -183,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
                 help="Path to a checkpoint (.pt) to resume training from.",
             )
-        if name == "final_test":
+        if name in ("final_test", "robustness"):
             sub.add_argument(
                 "--checkpoint",
                 type=str,
@@ -337,6 +340,33 @@ def run_final_test_command(args: argparse.Namespace) -> None:
     )
 
 
+def run_robustness_command(args: argparse.Namespace) -> None:
+    """python run_pipeline.py robustness --model <name> --checkpoint <path.pt>.
+
+    Evaluates a single FROZEN, already-finally-tested checkpoint
+    (src/evaluation/final_test.py, Task 8) against fixed, predefined image
+    degradations (src/evaluation/robustness.py) - a separate, additional
+    test-time analysis. Never trains, never tunes, never modifies the
+    checkpoint's weights, and never overwrites Task 8's clean final-test
+    outputs (results/robustness/ is entirely separate from
+    results/raw_predictions/ and results/tables/<final_test_run_id>/).
+    """
+    summary = run_robustness_evaluation(
+        model_name=args.model,
+        checkpoint_path=args.checkpoint,
+        dataset_config_path=args.dataset_config,
+        models_config_path=args.config,
+        seed=args.seed,
+        device_override=None if args.device == "auto" else args.device,
+        num_workers_override=args.num_workers,
+        batch_size_override=args.batch_size,
+    )
+    print(
+        f"[run_pipeline] robustness_run_id={summary.robustness_run_id} model={summary.model_name} "
+        f"n={summary.num_samples} metrics={summary.metrics_path} metadata={summary.metadata_path}"
+    )
+
+
 def dispatch(args: argparse.Namespace) -> None:
     command = args.command
 
@@ -351,7 +381,7 @@ def dispatch(args: argparse.Namespace) -> None:
         "calibration": lambda: not_implemented(command, "src/evaluation (calibration/uncertainty)"),
         "selective": lambda: not_implemented(command, "src/evaluation (selective prediction)"),
         "gradcam": lambda: not_implemented(command, "src/visualization (Grad-CAM)"),
-        "robustness": lambda: not_implemented(command, "src/evaluation (robustness)"),
+        "robustness": lambda: run_robustness_command(args),
         "multi_seed": lambda: not_implemented(command, "src/statistics (multi-seed aggregation)"),
         "publication": lambda: not_implemented(command, "src/visualization + src/statistics (publication assets)"),
         "final_test": lambda: run_final_test_command(args),
@@ -408,6 +438,9 @@ def main(argv=None) -> int:
         return 1
     except (FinalTestError, MetricsInputError) as e:
         print(f"[run_pipeline] FINAL TEST ERROR: {e}", file=sys.stderr)
+        return 1
+    except RobustnessError as e:
+        print(f"[run_pipeline] ROBUSTNESS ERROR: {e}", file=sys.stderr)
         return 1
 
     return 0
