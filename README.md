@@ -1256,6 +1256,60 @@ Outputs (a separate run directory from Phase 1's): `results/ambiguity/<run_id>/n
 
 Wire into `CSSupConLoss`, `run_aa_evidentnet.py`, or any training objective; use `test_original.csv` anywhere; build the matrix from validation confusion; modify any Phase 1 file; retrain or fine-tune anything; claim the neighborhood method outperforms the prototype method (that requires actually reviewing the validation numbers, which is the next step, not this one).
 
+## Phase 3: continuous class-affinity ambiguity (research only — `src/losses/class_affinity_ambiguity.py`, `src/training/class_affinity_ambiguity_setup.py`, `src/evaluation/class_affinity_ambiguity_validation.py`)
+
+**Exploratory. Uses the same frozen, previously-trained AA-EvidentNet checkpoint as Phase 1/Phase 2 — no new model training occurs anywhere in this phase.**
+
+**Motivation**: Phase 1 (one centroid per class) and Phase 2 (discrete top-k neighbor votes) both struggled with Healthy ↔ Glaucoma, the single largest real validation confusion, and Phase 2's per-sample ambiguity turned out extremely sparse (median 0.0 for both correct and incorrect predictions). Phase 3 tries a **continuous middle ground**: for every class, the mean similarity to that class's m=5 nearest training samples — richer than a single centroid, denser than a discrete vote. `m=5` and the analysis temperature `0.1` are **predetermined, not tuned** on any result. Phase 1 and Phase 2 are completely unmodified.
+
+### Class affinity: exact construction
+
+```
+a_i,c = mean(top-m cosine similarities between z_i and every TRAIN embedding of class c)
+```
+
+For a query embedding and every class, using `min(m, available candidates)`. When computing this for a **train** sample against its **own** class, the sample's own entry is excluded first (its similarity to itself is always exactly 1.0, which would otherwise trivially dominate).
+
+### Primary sample ambiguity
+
+Sort the K class affinities; `a1`/`a2` = top two values:
+
+```
+margin_i    = a1 - a2
+ambiguity_i = 1 - clip(margin_i / margin_scale, 0, 1)     ← PRIMARY score, in [0,1]
+```
+
+`margin_scale` = the 95th percentile of **train** samples' own (self-excluded) top1-top2 margins — fit once from `train_original.csv` only, **never validation or test**. Fails loudly if numerically zero rather than silently dividing by ~0. Secondary diagnostics (reported, never replacing the primary score): normalized entropy of `softmax(affinities/0.1)`, top1/top2 affinity + class, raw margin.
+
+### Label-aware boundary score — ANALYSIS ONLY, never an inference-time score
+
+```
+boundary_gap_i = affinity to the TRUE class − max affinity to any OTHER class
+label_aware_ambiguity_i = 1 - clip(boundary_gap_i / boundary_gap_scale, 0, 1)
+```
+
+The same simple train-scaled transform as the primary score (no new trainable function). **Requires the ground-truth label, so it can only ever be an analysis tool — it must never be proposed as something the model could compute at inference time on a new, unlabeled image.**
+
+### Class-level affinity matrix
+
+```
+directed(a→b) = mean over train samples in class a of their (self-excluded) affinity to class b
+A_sym[a,b]    = (directed(a→b) + directed(b→a)) / 2,  A_sym[a,a] = 0
+A[a,b]        = min-max rescale of A_sym's OWN off-diagonal entries to [0,1]   (train-derived only)
+```
+
+Symmetric, zero diagonal, bounded [0,1], deterministic — never built from a confusion matrix, exactly like Phase 1/2.
+
+### Validation-only protocol and three-way comparison
+
+Validation is used **only for evaluation**, never for fitting anything — `margin_scale`/`boundary_gap_scale` and the matrix all come from `train_original.csv` alone. `test_original.csv` is completely untouched. The validation analyses mirror Phase 1's/Phase 2's own (error-detection AUROC/AUPRC, correct-vs-incorrect ambiguity, hard-pair-class ambiguity — explicitly **not** claimed as validated just because they were hand-picked originally, Spearman vs. EDL uncertainty, ambiguity/EDL quadrants, matrix-vs-confusion ranking, top pairs), plus `build_three_phase_comparison`, which reads Phase 1's and Phase 2's own saved artifacts and reports all three methods' numbers side by side — **making no claim about which is better**.
+
+Outputs: `results/ambiguity/<run_id>/class_affinity_ambiguity_matrix.csv`, `class_affinity_validation_metrics.json`, `class_affinity_metadata.json`, `phase1_phase2_phase3_comparison.json`.
+
+### What Phase 3 deliberately does NOT do
+
+Wire into `CSSupConLoss` or any training objective; use `test_original.csv` anywhere; fit `margin_scale`/`boundary_gap_scale` on anything but `train_original.csv`; propose the label-aware boundary score as an inference-time signal (it needs the true label); tune `m` or `temperature`; modify Phase 1 or Phase 2; retrain or fine-tune anything; claim any method is better before the real validation numbers have actually been reviewed.
+
 ## Repository structure
 
 ```text

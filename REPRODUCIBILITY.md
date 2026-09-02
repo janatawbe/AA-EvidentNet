@@ -877,6 +877,53 @@ This entire phase was implemented and tested against tiny synthetic fixtures onl
 - Phase 1's files and test results are unchanged.
 - No performance or novelty claim is made about the neighborhood method - it has not yet been run against real data.
 
+### Real validation results (run separately, on Colab, against the real checkpoint/manifests)
+
+Reference checkpoint: `checkpoints/20260831_064112_aa_evidentnet_seed42_48c214/best.pt` (SHA-256 `800d6184416d77a2a2d1447680ca7869bb973d62fc361f15a6ddfa0e95be2c2a`). Frozen splits: `train_original.csv` (3075 samples), `val_original.csv` (880 samples) - `test_original.csv` was not used.
+
+|  | Phase 1 (prototype) | Phase 2 (neighborhood, k=10) |
+|---|---|---|
+| Error-detection AUROC | 0.5703292638 | 0.5199408065 |
+| Error-detection AUPRC | 0.2040891098 | 0.1056149733 |
+| Class-matrix vs. confusion Spearman | 0.3068058483 | 0.4061831051 |
+| Competing-class hit rate among errors | 0.0117647059 | 0.0 |
+
+Phase 2 improved the class-level structure correlation (0.3068 -> 0.4062) but its per-sample ambiguity became worse (lower AUROC/AUPRC) and extremely sparse (median 0.0 for both correct and incorrect predictions). Neither approach strongly identified the largest real validation confusion (Healthy <-> Glaucoma, 35 errors) - this is the specific, disclosed weakness Phase 3 (below) investigates. These are real, already-observed results, not projections - reported here exactly as measured, with no claim about which method is preferable.
+
+## Phase 3: continuous class-affinity ambiguity reproducibility (research only, `feature/learned-ambiguity`)
+
+**Exploratory, uses the same frozen previously-trained checkpoint as Phase 1/2. No new model training occurs.** Neither Phase 1 nor Phase 2 was modified - all of their existing tests were re-run unmodified and still pass.
+
+### Method: exact equations
+
+`src/losses/class_affinity_ambiguity.py` (pure math, no I/O):
+
+- `compute_class_affinities(query, reference, reference_labels, num_classes, m=5, exclude_self=False)`: `a_i,c = mean(top-min(m, available) cosine similarities to reference embeddings of class c)`. `exclude_self=True` (query IS reference, row-aligned) removes each sample's own diagonal entry before ranking - implemented via `np.fill_diagonal(similarity, -inf)` plus a per-row effective-count adjustment so the excluded position can never be accidentally included when a class has few samples (verified by `test_affinity_exclude_self_removes_own_entry` and the degenerate-count path).
+- Primary score: `margin_i = a1 - a2` (top1 minus top2 class affinity); `ambiguity_i = 1 - clip(margin_i / margin_scale, 0, 1)`. `margin_scale` = 95th percentile of TRAIN samples' own self-excluded top1-top2 margins (`fit_margin_scale`) - raises `ClassAffinityAmbiguityError` if numerically <= 0.
+- Secondary diagnostic: normalized entropy of `softmax(affinities / temperature)`, `temperature=0.1` fixed.
+- Label-aware boundary score (ANALYSIS ONLY - documented in the module docstring, the metadata, and here as never an inference-time candidate): `boundary_gap_i = a_i,y - max_{c!=y} a_i,c`; `label_aware_ambiguity_i = 1 - clip(boundary_gap_i / boundary_gap_scale, 0, 1)` - deliberately the identical transform shape as the primary score (no new trainable function), `boundary_gap_scale` fit the same way (95th percentile of TRAIN samples' own boundary gaps).
+- Class matrix (`compute_class_affinity_matrix`): `directed(a->b) = mean over train samples in class a of their self-excluded affinity to class b`; symmetrized, zero diagonal, min-max rescaled using only its own off-diagonal entries - the same "directed score -> symmetrize -> rescale" pattern as Phase 1/Phase 2's own matrices, applied to a genuinely different underlying quantity (continuous class affinity, not a single centroid or a discrete neighbor vote).
+
+### A real numerical fragility discovered during testing (not a code defect)
+
+Early test runs of `tests/test_class_affinity_ambiguity_setup.py`/`tests/test_class_affinity_ambiguity_validation.py` intermittently failed with `boundary_gap_scale is numerically zero or negative`. Investigation showed this was NOT a bug in the fail-loud check (which is working exactly as specified) but a genuine property of the test fixtures: unlike `margin_scale` (always >= 0 by construction, since top1 >= top2), `boundary_gap` has no such sign guarantee, and an **untrained** reference model's embedding space (used only in tests - the real reference checkpoint is fully trained) has very little real class structure to rely on. Combined with `tests/conftest.py: make_image()`'s default per-FILE (not per-class) hash-derived color, the resulting synthetic images gave an untrained model too weak and inconsistent a signal, so the 95th percentile of boundary gaps occasionally landed just below zero purely from incidental per-test image/seed variation - not from anything the code under test did wrong. Fixed two ways, both applied in `tests/test_class_affinity_ambiguity_setup.py` and `tests/test_class_affinity_ambiguity_validation.py`: (1) a fixed `torch.manual_seed(42)` before constructing the untrained reference model, and (2) assigning each class a fixed, distinct base color (`_CLASS_COLOR_PALETTE`, with small per-sample jitter) instead of relying on incidental per-path hash noise. Neither fix touches the module under test - both are test-fixture-only changes, and the underlying fail-loud check in `src/losses/class_affinity_ambiguity.py` is unchanged.
+
+### Orchestration and leakage safeguards (identical guarantees to Phase 1/Phase 2)
+
+`src/training/class_affinity_ambiguity_setup.py: build_class_affinity_ambiguity` loads the reference checkpoint read-only into its own throwaway model instance (`eval()`, every parameter's `requires_grad` forced `False`, no optimizer, no backward pass - all spy-verified), reads `train_original.csv` only, and keeps the full train embedding/label arrays (validation-time affinity computation needs to search the individual training embeddings, not a summary). `src/evaluation/class_affinity_ambiguity_validation.py: run_class_affinity_ambiguity_validation` reads `val_original.csv` only and has no test-manifest parameter at all (checked structurally). Neither module's public function signature contains anything named `test*`.
+
+### Three-way comparison
+
+`build_three_phase_comparison` reads Phase 1's and Phase 2's own already-saved `*_metrics.json`/`*_matrix.csv` artifacts (never recomputed) plus Phase 3's own in-memory summary, and reports all three methods' key metrics and each of the three existing fixed hard pairs' rank/value in all three matrices side by side. The code contains no comparison operator or conditional that would let it assert one phase is "better" - it only assembles and writes the numbers, verified by a test that checks the output's disclaiming `"note"` field is present.
+
+### Tests added
+
+`tests/test_class_affinity_ambiguity.py` (32 - affinity correctness including self-exclusion, top-affinity ranking with tie-breaking, margin-scale/boundary-gap-scale fitting and their zero/negative rejection, entropy bounds, class-matrix symmetry/zero-diagonal/bounds/degenerate handling), `tests/test_class_affinity_ambiguity_setup.py` (14 - end-to-end correctness against independently-recomputed scales, frozen-reference-model guarantees, train-only manifest dependency, checkpoint-never-modified, own-sample exclusion verified by comparing against a with-exclusion-disabled recomputation), `tests/test_class_affinity_ambiguity_validation.py` (15 - end-to-end schema, bounded metrics, hard-pair rank reporting for all three named pairs, zero test-manifest dependency, three-way comparison artifact correctness) - 61 new tests, all synthetic-fixture-only. Phase 1's and Phase 2's existing tests were re-run unmodified as the regression check for "Phase 1/Phase 2 behavior unchanged."
+
+### Not yet run against real data
+
+Exactly like Phase 1 and Phase 2 before it, this phase was implemented and tested against tiny synthetic fixtures only. Running `build_class_affinity_ambiguity` / `run_class_affinity_ambiguity_validation` / `build_three_phase_comparison` against the real checkpoint and manifests to get real numbers - and to see whether Healthy <-> Glaucoma is captured better than in Phase 1/Phase 2 - is a separate, later step (see README.md for the exact function calls).
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.
