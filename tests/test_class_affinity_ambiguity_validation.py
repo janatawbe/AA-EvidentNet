@@ -205,6 +205,70 @@ def test_quadrant_counts_sum_to_total_val_samples(tmp_path):
     assert sum(summary.quadrant_counts.values()) == summary.num_val_samples
 
 
+def test_per_sample_csv_not_written_by_default(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_train=8, n_val=4)
+    checkpoint_path = _build_checkpoint(tmp_path, models_cfg, len(canonical_classes))
+    artifact = _build_artifact(tmp_path, dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir, checkpoint_path)
+
+    summary = _run_validation(tmp_path, dataset_cfg, models_cfg, artifact, manifests_dir, raw_dir)
+
+    assert summary.per_sample_path is None
+    assert not (Path(summary.metrics_path).parent / "class_affinity_per_sample.csv").exists()
+
+
+def test_per_sample_csv_written_when_requested(tmp_path):
+    import csv as csv_module
+
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_train=8, n_val=6)
+    checkpoint_path = _build_checkpoint(tmp_path, models_cfg, len(canonical_classes))
+    artifact = _build_artifact(tmp_path, dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir, checkpoint_path)
+
+    summary = _run_validation(
+        tmp_path, dataset_cfg, models_cfg, artifact, manifests_dir, raw_dir, save_per_sample_csv=True
+    )
+
+    assert summary.per_sample_path is not None
+    per_sample_path = Path(summary.per_sample_path)
+    assert per_sample_path.name == "class_affinity_per_sample.csv"
+    assert per_sample_path.is_file()
+
+    with open(per_sample_path, newline="", encoding="utf-8") as f:
+        rows = list(csv_module.DictReader(f))
+    assert len(rows) == summary.num_val_samples
+    expected_columns = {
+        "sample_id", "image_path", "true_class_name", "predicted_class_name",
+        "correct", "ambiguity", "edl_uncertainty",
+    }
+    assert set(rows[0].keys()) == expected_columns
+    for row in rows:
+        assert row["true_class_name"] in canonical_classes
+        assert row["predicted_class_name"] in canonical_classes
+        assert row["correct"] in ("0", "1")
+        assert 0.0 <= float(row["ambiguity"]) <= 1.0
+        assert 0.0 < float(row["edl_uncertainty"]) <= 1.0
+
+    with open(summary.metadata_path, encoding="utf-8") as f:
+        metadata = json.load(f)
+    assert metadata["per_sample_path"] == str(per_sample_path)
+
+
+def test_per_sample_csv_does_not_change_existing_metrics(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_train=8, n_val=6)
+    checkpoint_path = _build_checkpoint(tmp_path, models_cfg, len(canonical_classes))
+    artifact = _build_artifact(tmp_path, dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir, checkpoint_path)
+
+    summary_without = _run_validation(tmp_path, dataset_cfg, models_cfg, artifact, manifests_dir, raw_dir)
+    summary_with = _run_validation(
+        tmp_path, dataset_cfg, models_cfg, artifact, manifests_dir, raw_dir, save_per_sample_csv=True
+    )
+
+    assert summary_without.error_detection_auroc == summary_with.error_detection_auroc
+    assert summary_without.error_detection_auprc == summary_with.error_detection_auprc
+    assert summary_without.ambiguity_mean_correct == summary_with.ambiguity_mean_correct
+    assert summary_without.ambiguity_mean_incorrect == summary_with.ambiguity_mean_incorrect
+    assert summary_without.spearman_ambiguity_vs_edl_uncertainty == summary_with.spearman_ambiguity_vs_edl_uncertainty
+
+
 def test_hard_pair_ranks_reported_for_all_three_named_pairs(tmp_path):
     dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_train=8, n_val=4)
     checkpoint_path = _build_checkpoint(tmp_path, models_cfg, len(canonical_classes))

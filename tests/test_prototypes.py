@@ -265,6 +265,54 @@ def test_extract_embeddings_matches_compute_class_prototypes_embeddings(tmp_path
         assert prototypes[k] == pytest.approx(expected, abs=1e-5)
 
 
+def test_extract_embeddings_identifiers_default_off(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=2)
+    models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    model.eval()
+
+    dataset, loader = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    result = extract_embeddings(model, loader, torch.device("cpu"))
+
+    assert result.sample_ids is None
+    assert result.image_paths is None
+
+
+def test_extract_embeddings_include_identifiers_populates_ids_and_paths(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=2)
+    models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    model.eval()
+
+    dataset, loader = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    result = extract_embeddings(model, loader, torch.device("cpu"), include_identifiers=True)
+
+    n = len(canonical_classes) * 2
+    assert result.sample_ids is not None and result.sample_ids.shape == (n,)
+    assert result.image_paths is not None and result.image_paths.shape == (n,)
+    assert set(result.sample_ids.tolist()) == {row["original_id"] for row in dataset.rows}
+    for path in result.image_paths.tolist():
+        assert str(raw_dir) in path
+
+
+def test_extract_embeddings_include_identifiers_does_not_change_other_fields(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=2)
+    models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    model.eval()
+
+    dataset, loader_a = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    without_ids = extract_embeddings(model, loader_a, torch.device("cpu"), include_identifiers=False)
+
+    _, loader_b = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    with_ids = extract_embeddings(model, loader_b, torch.device("cpu"), include_identifiers=True)
+
+    assert without_ids.embeddings == pytest.approx(with_ids.embeddings)
+    assert np.array_equal(without_ids.labels, with_ids.labels)
+    assert np.array_equal(without_ids.predictions, with_ids.predictions)
+    assert without_ids.uncertainty == pytest.approx(with_ids.uncertainty)
+
+
 def test_extract_embeddings_raises_on_empty_loader(tmp_path):
     dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=1)
     models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))

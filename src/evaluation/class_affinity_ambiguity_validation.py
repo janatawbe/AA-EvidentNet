@@ -119,6 +119,7 @@ class ClassAffinityAmbiguityValidationSummary:
     matrix_path: str
     metrics_path: str
     metadata_path: str
+    per_sample_path: Optional[str] = None
 
 
 def _pair_rank_and_value(matrix: np.ndarray, canonical_classes: Sequence[str], class_a: str, class_b: str) -> Tuple[Optional[int], Optional[float]]:
@@ -145,6 +146,7 @@ def run_class_affinity_ambiguity_validation(
     output_dir: Union[str, Path] = "results/ambiguity",
     batch_size: int = DEFAULT_BATCH_SIZE,
     num_workers: int = DEFAULT_NUM_WORKERS,
+    save_per_sample_csv: bool = False,
 ) -> ClassAffinityAmbiguityValidationSummary:
     """Run the class-affinity ambiguity validation analyses against
     `val_manifest_path` (data/manifests/val_original.csv) using the SAME
@@ -153,6 +155,17 @@ def run_class_affinity_ambiguity_validation(
     `src.training.class_affinity_ambiguity_setup.build_class_affinity_ambiguity`
     (passed in as `artifact`). Never reads, requires, or references
     data/manifests/test_original.csv.
+
+    `save_per_sample_csv` is opt-in and defaults to False, so every
+    existing caller/test is byte-for-byte unaffected. When True, also
+    writes `class_affinity_per_sample.csv` (sample_id, image_path,
+    true_class_name, predicted_class_name, correct, ambiguity,
+    edl_uncertainty) into this run's own output directory, letting a
+    downstream analysis (e.g. Phase 3b's ambiguity/EDL complementarity
+    study) reuse this run's already-computed per-sample values without a
+    second forward pass over the checkpoint. Does not change any of the
+    values computed above - purely an additional, read-only export of
+    numbers already in memory.
     """
     canonical_classes = artifact.canonical_classes
     num_classes = len(canonical_classes)
@@ -190,7 +203,7 @@ def run_class_affinity_ambiguity_validation(
         require_all_original=True,
     )
     loader = build_eval_dataloader(val_dataset, batch_size=batch_size, num_workers=num_workers)
-    extracted = extract_embeddings(reference_model, loader, device)
+    extracted = extract_embeddings(reference_model, loader, device, include_identifiers=save_per_sample_csv)
 
     y_true_arr = extracted.labels
     y_pred_arr = extracted.predictions
@@ -284,6 +297,33 @@ def run_class_affinity_ambiguity_validation(
         matrix_rows.append(row)
     write_csv(matrix_rows, matrix_columns, matrix_path)
 
+    per_sample_path: Optional[Path] = None
+    if save_per_sample_csv:
+        per_sample_path = base_dir / "class_affinity_per_sample.csv"
+        per_sample_columns = [
+            "sample_id",
+            "image_path",
+            "true_class_name",
+            "predicted_class_name",
+            "correct",
+            "ambiguity",
+            "edl_uncertainty",
+        ]
+        per_sample_rows = []
+        for i in range(len(val_dataset)):
+            per_sample_rows.append(
+                {
+                    "sample_id": extracted.sample_ids[i],
+                    "image_path": extracted.image_paths[i],
+                    "true_class_name": canonical_classes[int(y_true_arr[i])],
+                    "predicted_class_name": canonical_classes[int(y_pred_arr[i])],
+                    "correct": int(1 - is_error[i]),
+                    "ambiguity": float(ambiguity[i]),
+                    "edl_uncertainty": float(edl_uncertainty[i]),
+                }
+            )
+        write_csv(per_sample_rows, per_sample_columns, per_sample_path)
+
     summary = ClassAffinityAmbiguityValidationSummary(
         run_id=run_id,
         num_val_samples=len(val_dataset),
@@ -314,6 +354,7 @@ def run_class_affinity_ambiguity_validation(
         matrix_path=str(matrix_path),
         metrics_path=str(base_dir / "class_affinity_validation_metrics.json"),
         metadata_path=str(base_dir / "class_affinity_metadata.json"),
+        per_sample_path=str(per_sample_path) if per_sample_path is not None else None,
     )
 
     with open(summary.metrics_path, "w", encoding="utf-8") as f:
@@ -369,6 +410,7 @@ def run_class_affinity_ambiguity_validation(
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "matrix_path": str(matrix_path),
         "metrics_path": summary.metrics_path,
+        "per_sample_path": summary.per_sample_path,
     }
     with open(summary.metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)

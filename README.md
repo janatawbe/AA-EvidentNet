@@ -1310,6 +1310,41 @@ Outputs: `results/ambiguity/<run_id>/class_affinity_ambiguity_matrix.csv`, `clas
 
 Wire into `CSSupConLoss` or any training objective; use `test_original.csv` anywhere; fit `margin_scale`/`boundary_gap_scale` on anything but `train_original.csv`; propose the label-aware boundary score as an inference-time signal (it needs the true label); tune `m` or `temperature`; modify Phase 1 or Phase 2; retrain or fine-tune anything; claim any method is better before the real validation numbers have actually been reviewed.
 
+### Real Phase 1/2/3 validation numbers (for reference — Phase 3b, below, builds on these)
+
+Obtained by actually running the frozen checkpoint against `val_original.csv` (880 samples, 85 errors). Reported here for context only — no code in this repository computed these; they were produced by a real run of the validation modules above.
+
+| | Phase 1 (prototype) | Phase 2 (neighborhood) | Phase 3 (class-affinity) |
+|---|---|---|---|
+| Error-detection AUROC | 0.5703292638 | 0.5199408065 | 0.709478357380688 |
+| Error-detection AUPRC | 0.2040891098 | 0.1056149733 | 0.2359527095006137 |
+| Matrix-vs-confusion Spearman | 0.3068058483 | 0.4061831051 | 0.3515634766234436 |
+| Competing-class hit rate | 0.0117647059 | 0.0 | (see below) |
+
+Phase 3 additional real numbers: mean ambiguity correct/incorrect = 0.15379148446637772 / 0.23670059569672192; median correct/incorrect = 0.20640899600548301 / 0.22451841330682754; Spearman(ambiguity, EDL uncertainty) = 0.753761860508129; Spearman(entropy, EDL uncertainty) = 0.9340102894017788. Quadrants (ambiguity × EDL uncertainty, median split): low/low n=412 err=0.0437, low/high n=28 err=0.1071, high/low n=28 err=0.0714, high/high n=412 err=0.1505. Named pairs in the Phase 3 matrix: Healthy↔Glaucoma rank 6 (value 0.8644270977122319, the largest real validation confusion, 35 errors); Disc Edema↔Glaucoma rank 44 (0.015079892138545683); Diabetic Retinopathy↔Central Serous Chorioretinopathy rank 36 (0.6690422138001464).
+
+## Phase 3b: does ambiguity add anything beyond EDL uncertainty? (research only — `src/evaluation/ambiguity_complementarity.py`)
+
+**Exploratory, additive, analysis-only. No training, no new inference, no changes to Phase 1/2/3's equations or scores.**
+
+**Motivation**: Phase 3's real Spearman correlation between ambiguity and EDL uncertainty (0.75) is fairly high, and the "high ambiguity" quadrant already overlaps heavily with "high EDL uncertainty" (412 of 880 samples fall in both). Before treating ambiguity as a useful *additional* signal, Phase 3b asks directly: does a score that also looks at ambiguity actually catch validation errors that EDL uncertainty alone misses — or is it mostly redundant?
+
+**Method**: Phase 3's own validation run (`run_class_affinity_ambiguity_validation(..., save_per_sample_csv=True)`) is extended, additively, to also write `class_affinity_per_sample.csv` (sample id, image path, true/predicted class, correct flag, ambiguity, EDL uncertainty) — the exact same 880 validation samples and 85 errors Phase 3 already evaluated, with zero re-inference. `src/evaluation/ambiguity_complementarity.py` then reads only that CSV (no model, no checkpoint, no manifest) and computes:
+
+```
+combined_score = 0.5 * normalized_ambiguity + 0.5 * normalized_edl_uncertainty     ← FIXED, not searched
+```
+
+No additional normalization fitting occurs: Phase 3's `ambiguity` is already in `[0,1]` via its own train-derived `margin_scale`, and EDL `uncertainty = K / sum(dirichlet_alpha)` is already mathematically bounded in `(0,1]` by construction — both are used as-is.
+
+Reported (all computed on the identical 880 samples / 85 errors): error-detection AUROC/AUPRC for EDL alone, ambiguity alone, and combined; the four exact metric differences; a median-split error-overlap breakdown (both/ambiguity-only/EDL-only/neither, among the 85 errors); the same breakdown among correct predictions (false alarms); the high-ambiguity/low-EDL and low-ambiguity/high-EDL discordant groups — count, error count, error rate, **recomputed from the per-sample data every run, never hardcoded**; the Spearman correlation; and, optionally, a paired bootstrap 95% CI (fixed seed, 10,000 resamples, degenerate single-class resamples skipped and counted) on the combined-minus-EDL and combined-minus-ambiguity AUROC differences.
+
+**Interpretation policy**: this module never asserts that ambiguity is or isn't complementary — it only reports the numbers above. A high correlation alone does not prove redundancy, and a combined-score improvement alone does not prove statistical significance; both must be read together, alongside the bootstrap CI, before drawing a conclusion.
+
+Outputs: `results/ambiguity/<run_id>/ambiguity_edl_complementarity.json` (and, from the extended Phase 3 run, `class_affinity_per_sample.csv`).
+
+**Status**: implemented and unit-tested on synthetic fixtures only. Not yet run against the real checkpoint/validation set — the numbers above (real Phase 1/2/3 results) are the input Phase 3b is designed to consume once that real per-sample CSV exists.
+
 ## Repository structure
 
 ```text

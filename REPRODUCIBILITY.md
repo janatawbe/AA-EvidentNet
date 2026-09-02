@@ -920,9 +920,52 @@ Early test runs of `tests/test_class_affinity_ambiguity_setup.py`/`tests/test_cl
 
 `tests/test_class_affinity_ambiguity.py` (32 - affinity correctness including self-exclusion, top-affinity ranking with tie-breaking, margin-scale/boundary-gap-scale fitting and their zero/negative rejection, entropy bounds, class-matrix symmetry/zero-diagonal/bounds/degenerate handling), `tests/test_class_affinity_ambiguity_setup.py` (14 - end-to-end correctness against independently-recomputed scales, frozen-reference-model guarantees, train-only manifest dependency, checkpoint-never-modified, own-sample exclusion verified by comparing against a with-exclusion-disabled recomputation), `tests/test_class_affinity_ambiguity_validation.py` (15 - end-to-end schema, bounded metrics, hard-pair rank reporting for all three named pairs, zero test-manifest dependency, three-way comparison artifact correctness) - 61 new tests, all synthetic-fixture-only. Phase 1's and Phase 2's existing tests were re-run unmodified as the regression check for "Phase 1/Phase 2 behavior unchanged."
 
-### Not yet run against real data
+### Not yet run against real data (superseded for Phase 3 - see below)
 
 Exactly like Phase 1 and Phase 2 before it, this phase was implemented and tested against tiny synthetic fixtures only. Running `build_class_affinity_ambiguity` / `run_class_affinity_ambiguity_validation` / `build_three_phase_comparison` against the real checkpoint and manifests to get real numbers - and to see whether Healthy <-> Glaucoma is captured better than in Phase 1/Phase 2 - is a separate, later step (see README.md for the exact function calls).
+
+### Real Phase 3 validation run (superseding the above)
+
+Phase 3 was subsequently run for real, against the frozen checkpoint and `val_original.csv` (880 samples, 85 errors; `m=5`, `temperature=0.1`, `margin_scale=1.009321797913053`; run id `20260902_115241_class_affinity_ambiguity_validation_seed0_59314c`). Real numbers: error-detection AUROC 0.709478357380688, AUPRC 0.2359527095006137; mean ambiguity correct/incorrect 0.15379148446637772 / 0.23670059569672192; Spearman(ambiguity, EDL uncertainty) 0.753761860508129; matrix-vs-confusion Spearman 0.3515634766234436; Healthy<->Glaucoma rank 6 (value 0.8644270977122319, the largest real validation confusion). Full numbers, including the Phase 1/Phase 2 comparison, are in README.md's "Real Phase 1/2/3 validation numbers" table. This run's numbers are unmodified by, and predate, the Phase 3b work below - Phase 3b reuses this same run's per-sample values rather than recomputing them.
+
+## Phase 3b: ambiguity/EDL-uncertainty complementarity reproducibility (research only, `feature/learned-ambiguity`)
+
+**Analysis-only. No training, no new model inference, no changes to any Phase 1/2/3 equation or score.** Motivated directly by the real Phase 3 numbers above: a Spearman correlation of 0.75 between ambiguity and EDL uncertainty, and a "high ambiguity" quadrant that overlaps with "high EDL uncertainty" for 412 of 880 samples, both suggest the two signals may be substantially redundant - Phase 3b checks this directly rather than assuming it either way.
+
+### Additive change 1: `src/models/prototypes.py: extract_embeddings`
+
+Added `include_identifiers: bool = False` (default off) and two new `Optional[np.ndarray]` fields on `ExtractedEmbeddings` (`sample_ids`, `image_paths`), populated from `batch["original_id"]`/`batch["image_path"]` (both already present on every `RetinalDataset` sample) only when `include_identifiers=True`. Every existing caller (Phase 1's/Phase 2's setup and validation modules, Phase 3's own setup module) omits the new argument, so their behavior - verified by re-running their existing test suites unchanged - is byte-for-byte identical to before this change.
+
+### Additive change 2: `src/evaluation/class_affinity_ambiguity_validation.py: run_class_affinity_ambiguity_validation`
+
+Added `save_per_sample_csv: bool = False` (default off) and an `Optional[str]` field `per_sample_path` on `ClassAffinityAmbiguityValidationSummary`. When `True`, writes `class_affinity_per_sample.csv` (`sample_id, image_path, true_class_name, predicted_class_name, correct, ambiguity, edl_uncertainty`) into the run's own output directory, using values already computed earlier in the same function - no second forward pass, no recomputation. Verified not to change any existing metric: `test_per_sample_csv_does_not_change_existing_metrics` runs the function twice (with and without the flag) against the identical inputs and asserts every existing summary field is unchanged; all 14 pre-existing Phase 3 validation tests were re-run unmodified and still pass.
+
+### `src/evaluation/ambiguity_complementarity.py`: the complementarity analysis itself
+
+Reads ONLY the per-sample CSV above - no model, checkpoint, or manifest of any kind, and no `import torch`. `AMBIGUITY_WEIGHT = 0.5` and `EDL_WEIGHT = 0.5` are fixed module-level constants (not searched, not fit): `combined_score = 0.5 * ambiguity + 0.5 * edl_uncertainty`. Neither input is renormalized before combining - `ambiguity` is already in `[0,1]` via Phase 3's own train-derived `margin_scale`, and EDL `uncertainty = K / sum(dirichlet_alpha)` is already bounded in `(0,1]` by construction (`src/losses/evidential.py`), so there is nothing left to fit "using train data only": both quantities were already produced by a train-data-only process before this module ever sees them.
+
+Computes, reusing `_error_detection_auroc`/`_error_detection_auprc`/`_spearman` from `src/evaluation/ood_uncertainty.py` (same cross-module private-helper-reuse convention as every other evaluation module in this project) rather than reimplementing them:
+
+- EDL-alone / ambiguity-alone / combined error-detection AUROC and AUPRC, and the four exact pairwise differences.
+- A median-split (computed on this same validation set, used only for these discrete breakdowns, never to fit anything) error-overlap table among the actual errors: both / ambiguity-only / EDL-only / neither.
+- The identical breakdown among correct predictions (false alarms).
+- The high-ambiguity/low-EDL and low-ambiguity/high-EDL discordant groups - count, error count, error rate - **recomputed from the loaded per-sample array on every call**; `test_discordant_groups_recomputed_not_hardcoded` constructs a 4-row fixture with a hand-verifiable answer and checks the module reproduces it, and no test or code path anywhere hardcodes the real run's 28/28 figures.
+- Spearman(ambiguity, EDL uncertainty) via the same reused helper Phase 3 itself uses.
+- An optional paired bootstrap 95% CI (`_bootstrap_auroc_diff_ci`): the SAME resampled indices are applied to all three scores within each iteration (so the distribution is of the matched difference, not of two independently resampled AUROCs); a resample is skipped and separately counted whenever `_error_detection_auroc` returns `None` for that resample (single-class-only, e.g. an all-correct or all-error draw); fixed `np.random.default_rng(seed)`, default 10,000 resamples, default seed 0, both overridable.
+
+The output JSON explicitly states, as literal fields (not just something a reader has to infer): the fixed combination equation, that the weights were predetermined and never searched, that no additional normalization was fitted, that no training/checkpoint/optimizer was touched, that `test_original.csv` was not used, and that all three scores were computed on the identical sample/error counts. A dedicated `NOTE` field states the interpretation policy: the module never asserts ambiguity is or isn't complementary - `test_result_never_claims_ambiguity_is_complementary` asserts no such claim string appears anywhere in the serialized output.
+
+### Leakage-safeguard tests (`tests/test_ambiguity_complementarity.py`, 23 tests)
+
+No test-manifest parameter (checked structurally via `inspect.signature`); no `import torch`, no `load_checkpoint`/`restore_training_state` call, no `torch.optim`, no `.backward(` anywhere in the module's source; no literal `"test_original.csv"` path construction anywhere in the module's source; combination weights fixed at `0.5`/`0.5` (asserted both as constants and via the computed formula); no weight grid or `argmax`-style search construct anywhere in the module; identical sample/error counts confirmed feeding all three scores; deterministic output (including the bootstrap CI) for a fixed input CSV and fixed seed, verified by running the full analysis twice and comparing every field.
+
+### Tests added
+
+`tests/test_ambiguity_complementarity.py` (23, new module, all synthetic per-sample CSVs), plus additive coverage in `tests/test_prototypes.py` (3 new tests for `include_identifiers`) and `tests/test_class_affinity_ambiguity_validation.py` (3 new tests for `save_per_sample_csv`) - all existing tests in both files continue to pass unmodified.
+
+### Not yet run against real data
+
+`src/evaluation/ambiguity_complementarity.py` has not yet been run against the real `class_affinity_per_sample.csv` (that file does not exist yet - Phase 3's real run predates this additive CSV-export feature). The exact Colab steps to produce it and run the real Phase 3b analysis are in README.md / the assistant's final report for this change.
 
 ## Configuration hashing
 

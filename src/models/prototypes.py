@@ -23,7 +23,7 @@ embeddings/prototypes.
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -130,9 +130,16 @@ class ExtractedEmbeddings:
     labels: np.ndarray  # [N] int
     predictions: np.ndarray  # [N] int
     uncertainty: np.ndarray  # [N] float, in (0, 1]
+    sample_ids: Optional[np.ndarray] = None  # [N] object (str), only if include_identifiers=True
+    image_paths: Optional[np.ndarray] = None  # [N] object (str), only if include_identifiers=True
 
 
-def extract_embeddings(model: torch.nn.Module, loader, device: torch.device) -> ExtractedEmbeddings:
+def extract_embeddings(
+    model: torch.nn.Module,
+    loader,
+    device: torch.device,
+    include_identifiers: bool = False,
+) -> ExtractedEmbeddings:
     """One forward pass over `loader`, collecting per-sample fused
     embeddings, true labels, argmax predictions, and EDL uncertainty - the
     single shared extraction loop used by every ambiguity/OOD mechanism in
@@ -143,11 +150,20 @@ def extract_embeddings(model: torch.nn.Module, loader, device: torch.device) -> 
     train_original.csv/val_original.csv with an eval-style transform) -
     this function itself always runs under `torch.inference_mode()`
     regardless. Raises PrototypeComputationError if the dataloader yields
-    zero batches (there is nothing meaningful to return)."""
+    zero batches (there is nothing meaningful to return).
+
+    `include_identifiers` is opt-in and defaults to False so every existing
+    caller (Phase 1/Phase 2/Phase 3/OOD) is byte-for-byte unaffected. When
+    True, also collects `batch["original_id"]`/`batch["image_path"]` (both
+    already present on every `RetinalDataset` sample) into
+    `ExtractedEmbeddings.sample_ids`/`.image_paths`, so a caller that needs
+    to persist a per-sample CSV can do so without a second forward pass."""
     embeddings_chunks: List[np.ndarray] = []
     labels_chunks: List[np.ndarray] = []
     predictions_chunks: List[np.ndarray] = []
     uncertainty_chunks: List[np.ndarray] = []
+    sample_id_chunks: List[np.ndarray] = []
+    image_path_chunks: List[np.ndarray] = []
 
     with torch.inference_mode():
         for batch in loader:
@@ -163,6 +179,10 @@ def extract_embeddings(model: torch.nn.Module, loader, device: torch.device) -> 
             predictions_chunks.append(preds)
             uncertainty_chunks.append(output.uncertainty.detach().cpu().numpy())
 
+            if include_identifiers:
+                sample_id_chunks.append(np.asarray(batch["original_id"], dtype=object))
+                image_path_chunks.append(np.asarray(batch["image_path"], dtype=object))
+
     if not embeddings_chunks:
         raise PrototypeComputationError("the dataloader produced zero batches - cannot extract embeddings")
 
@@ -171,4 +191,6 @@ def extract_embeddings(model: torch.nn.Module, loader, device: torch.device) -> 
         labels=np.concatenate(labels_chunks, axis=0),
         predictions=np.concatenate(predictions_chunks, axis=0),
         uncertainty=np.concatenate(uncertainty_chunks, axis=0),
+        sample_ids=np.concatenate(sample_id_chunks, axis=0) if include_identifiers else None,
+        image_paths=np.concatenate(image_path_chunks, axis=0) if include_identifiers else None,
     )
