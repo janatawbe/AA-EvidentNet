@@ -59,7 +59,8 @@ cs_supcon:
     - ["Diabetic Retinopathy", "Central Serous Chorioretinopathy"]
 
   # ---------------------------------------------------------------------
-  # Learned class-level ambiguity (feature/learned-ambiguity, Phase 1).
+  # Learned class-level ambiguity (feature/learned-ambiguity, Phase 1 and
+  # Phase 3-experimental).
   #
   # `ambiguity_source` selects how the per-pair negative weight in
   # CS-SupCon is determined (see src/losses/ambiguity.py and
@@ -68,18 +69,34 @@ cs_supcon:
   #     above, EXACTLY as before this field existed. An existing
   #     configs/losses.yaml with no `ambiguity_source` key at all parses
   #     to this same default - zero behavior change unless reconfigured.
-  #   - "learned_class": w(i,a) = 1 + ambiguity_scale * A[y_i, y_a], where
-  #     A is a FROZEN, non-trainable K x K matrix built once, before
-  #     training begins, from an existing reference AA-EvidentNet
-  #     checkpoint's embeddings over train_original.csv only (see
+  #   - "learned_class" (Phase 1): w(i,a) = 1 + ambiguity_scale *
+  #     A[y_i, y_a], where A is a FROZEN, non-trainable K x K matrix built
+  #     once, before training begins, from an existing reference
+  #     AA-EvidentNet checkpoint's embeddings over train_original.csv only
+  #     (class PROTOTYPE cosine similarity - see
   #     src/training/ambiguity_setup.py) - never from validation or test
   #     data, never updated during the new training run.
+  #   - "learned_class_affinity" (Phase 3-experimental, CONTROLLED
+  #     EXPERIMENT ONLY - not yet run): the IDENTICAL formula and
+  #     IDENTICAL freezing/timing guarantees as "learned_class" above, but
+  #     A is Phase 3's continuous class-affinity matrix instead of Phase
+  #     1's class-prototype matrix (mean top-m=5 cosine affinity to each
+  #     class's train embeddings, symmetrized, min-max rescaled - see
+  #     src/losses/class_affinity_ambiguity.py and
+  #     src/training/class_affinity_ambiguity_cs_supcon_setup.py). The
+  #     ONLY intended difference from a "learned_class" run under
+  #     otherwise identical settings is which pre-built matrix is
+  #     installed - everything else (architecture, optimizer, scheduler,
+  #     augmentation, seed, EDL, this same ambiguity_scale, early
+  #     stopping, manifests, checkpoint-selection criterion) is unchanged.
   #
   # `ambiguity_scale` is PROVISIONAL, not tuned from any observed result -
   # 1.0 was chosen so that a class pair with maximal learned ambiguity
   # (A[a,b]=1) receives the same weight (2.0) the existing
   # ambiguity_weight default already uses for a fixed hard pair, keeping
-  # the two mechanisms' magnitudes directly comparable.
+  # the two mechanisms' magnitudes directly comparable. This SAME value
+  # is reused, unmodified, for "learned_class_affinity" - it is not a
+  # separately chosen or tuned number for that mode.
   #
   # NOTE: "learned_class_sample" (letting each anchor's OWN sample-level
   # ambiguity further modulate this weight) is intentionally NOT a valid
@@ -91,13 +108,16 @@ cs_supcon:
   ambiguity_source: fixed_pairs
   ambiguity_scale: 1.0
 
-  # Required ONLY when ambiguity_source=learned_class - path to the
-  # existing, already-frozen AA-EvidentNet checkpoint whose embeddings
-  # (over train_original.csv only) are used to build the class-ambiguity
-  # matrix (src/training/ambiguity_setup.py). No default is provided
-  # (null): a missing value fails loudly with a clear config error rather
-  # than silently skipping the mechanism. Unused, and never validated,
-  # when ambiguity_source=fixed_pairs.
+  # Required ONLY when ambiguity_source is learned_class or
+  # learned_class_affinity - path to the existing, already-frozen
+  # AA-EvidentNet checkpoint whose embeddings (over train_original.csv
+  # only) are used to build the class-ambiguity matrix
+  # (src/training/ambiguity_setup.py for "learned_class",
+  # src/training/class_affinity_ambiguity_cs_supcon_setup.py for
+  # "learned_class_affinity"). No default is provided (null): a missing
+  # value fails loudly with a clear config error rather than silently
+  # skipping the mechanism. Unused, and never validated, when
+  # ambiguity_source=fixed_pairs.
   reference_checkpoint_path: null
   reference_model_name: aa_evidentnet
 

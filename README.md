@@ -1345,6 +1345,30 @@ Outputs: `results/ambiguity/<run_id>/ambiguity_edl_complementarity.json` (and, f
 
 **Status**: implemented and unit-tested on synthetic fixtures only. Not yet run against the real checkpoint/validation set — the numbers above (real Phase 1/2/3 results) are the input Phase 3b is designed to consume once that real per-sample CSV exists.
 
+## Phase 3-experimental: the learned class-affinity matrix as a TRAINING signal (research only, `feature/learned-ambiguity`, `ambiguity_source="learned_class_affinity"`)
+
+**Implementation and controlled-experiment infrastructure only — NO TRAINING HAS BEEN RUN.** Phase 3b (above) found EDL uncertainty alone (AUROC 0.7175) at least as strong as Phase 3 ambiguity alone (AUROC 0.7095) for error detection, with a fixed 0.5/0.5 combination showing no clear improvement (combined − EDL AUROC = −0.0083, bootstrap 95% CI [−0.0445, 0.0271]) — so this phase does **not** pursue another uncertainty-score fusion. Instead it asks a different question: is the Phase 3 continuous class-affinity *structure* useful as a **training signal**, replacing CS-SupCon's manually chosen hard pairs with a learned matrix?
+
+**This reuses existing infrastructure almost entirely.** CS-SupCon already had a generic `ambiguity_source="learned_class"` mode (Phase 1, `src/losses/cs_supcon.py` / `src/losses/ambiguity.py`) that installs *any* frozen `[K,K]` matrix via `set_learned_ambiguity_matrix(...)` and applies:
+
+```
+w(i,a) = 1 + ambiguity_scale * A[y_i, y_a]     for negatives, A frozen and non-trainable
+```
+
+— already wired end-to-end into `src/training/run_aa_evidentnet.py`. That mechanism doesn't care where `A` came from. This phase adds a second value, `ambiguity_source="learned_class_affinity"`, which hits the **identical** formula/code path but installs **Phase 3's** class-affinity matrix instead of Phase 1's class-prototype matrix — implemented as a thin wrapper (`src/training/class_affinity_ambiguity_cs_supcon_setup.py: build_class_affinity_ambiguity_for_cs_supcon`) around the **completely unmodified** `src.training.class_affinity_ambiguity_setup.build_class_affinity_ambiguity`. No Phase 3 equation was re-derived or duplicated.
+
+**`ambiguity_scale` was NOT invented for this mode.** `cs_supcon.ambiguity_scale` (default `1.0`) already existed for `"learned_class"` and is a single, shared config field — reused unmodified, with no separate tuning, for `"learned_class_affinity"` too. No new numeric hyperparameter was introduced.
+
+**Controlled-experiment design**: with everything else held fixed (architecture, image size, batch size, optimizer, scheduler, augmentation, seed, EDL settings, CS-SupCon `temperature`/`loss_weight`/`ambiguity_scale`, early stopping, train/validation manifests, checkpoint-selection criterion), the *only* changed variable between a `"fixed_pairs"` baseline run and a `"learned_class_affinity"` run is which weighting CS-SupCon's negatives use. The reference checkpoint used to build the matrix is loaded read-only (`eval()`, every parameter's `requires_grad` forced `False`, `torch.inference_mode()` throughout) into its own throwaway model instance — it is never the model being trained, and the experimental model is initialized exactly as `run_aa_evidentnet_training` always initializes it (fresh `create_model(...)`, never from the reference checkpoint's weights).
+
+**Test lock**: `build_class_affinity_ambiguity_for_cs_supcon` has no test-manifest parameter and never reads `test_original.csv`; matrix construction, the experimental run's setup, and checkpoint selection all depend on `train_original.csv`/`val_original.csv` only.
+
+**Artifacts** (per experimental run, under `results/logs/<run_id>/`): `ambiguity_metadata.json` — ambiguity mode, full matrix, class order, `matrix_construction_method`, `m`, reference checkpoint path + SHA-256, train manifest path + hash, `ambiguity_scale`, git commit, an explicit frozen-matrix confirmation, and an explicit test-data-not-used confirmation — plus `ambiguity_class_matrix.csv` (same matrix, CSV form). `experiments/registry.csv`'s `notes` column is tagged `ambiguity_source=learned_class_affinity` for any non-default run, so experimental runs are identifiable without opening the metadata file.
+
+**What this phase deliberately does NOT do**: train any model; evaluate `test_original.csv`; tune `ambiguity_scale` or any other hyperparameter; cherry-pick or hand-add class pairs (e.g. Healthy↔Glaucoma) into the learned matrix; mix manual and learned pairs; modify the matrix based on validation confusion; claim any performance difference — none has been measured.
+
+**Known open issue before a real run**: the reference checkpoint specified for this experiment (`checkpoints/20260831_064112_aa_evidentnet_seed42_48c214/best.pt`, expected SHA-256 `800d6184...`) does not exist in this repository's local environment (only four unrelated, older checkpoints are present under `results/checkpoints/`) — its presence and hash must be verified (e.g. on Colab) before the real experimental training run.
+
 ## Repository structure
 
 ```text

@@ -441,6 +441,170 @@ def test_unrelated_negatives_are_not_upweighted_like_ambiguous_ones():
     assert torch.isclose(unrel_no, unrel_with, atol=1e-6)
 
 
+# --- learned_class / learned_class_affinity ambiguity source
+# (feature/learned-ambiguity, Phase 1 and Phase 3-experimental): both
+# names hit the IDENTICAL forward() branch and formula
+# w(i,a) = 1 + ambiguity_scale * A[y_i, y_a] - these tests target
+# "learned_class_affinity" (the new, Phase 3-experimental value) since
+# that is what this phase adds, but every assertion applies equally to
+# "learned_class" (unchanged) because both share this exact code path. ---
+
+
+def _make_symmetric_matrix(num_classes=10, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    raw = torch.rand(num_classes, num_classes, generator=g)
+    sym = (raw + raw.T) / 2
+    sym.fill_diagonal_(0.0)
+    return sym
+
+
+def test_learned_class_affinity_requires_matrix_before_forward():
+    loss_fn = CSSupConLoss(ambiguity_source="learned_class_affinity", ambiguity_scale=1.0)
+    embeddings, labels = _make_batch(num_classes=10)
+    with pytest.raises(CSSupConConfigError, match="set_learned_ambiguity_matrix"):
+        loss_fn(embeddings, labels, num_classes=10)
+
+
+def test_learned_class_affinity_matrix_is_installed_as_frozen_non_trainable_buffer():
+    loss_fn = CSSupConLoss(ambiguity_source="learned_class_affinity", ambiguity_scale=1.0)
+    matrix = _make_symmetric_matrix()
+    loss_fn.set_learned_ambiguity_matrix(matrix)
+
+    buffer = dict(loss_fn.named_buffers())["learned_ambiguity_matrix"]
+    assert buffer.requires_grad is False
+    assert torch.equal(buffer, matrix)
+
+    # Defensive clone: mutating the caller's own tensor afterward must not
+    # silently change the installed (frozen) buffer.
+    matrix[0, 1] = 999.0
+    assert not torch.equal(buffer, matrix)
+
+
+def test_learned_class_affinity_weight_equation_matches_independent_reference_computation():
+    """Directly verifies test requirement #6: w(i,a) = 1 + ambiguity_scale
+    * A[y_i, y_a] for negatives. The reference computation below is an
+    INDEPENDENT re-implementation (built by directly indexing `matrix`),
+    never a call into CSSupConLoss's own internals - so this is a genuine
+    check of the documented formula, not a tautology."""
+    num_classes = 5
+    batch_size = 6
+    temperature = 0.1
+    scale = 1.7
+    g = torch.Generator().manual_seed(3)
+    embeddings = torch.randn(batch_size, 8, generator=g)
+    labels = torch.randint(0, num_classes, (batch_size,), generator=g)
+    matrix = _make_symmetric_matrix(num_classes=num_classes, seed=4)
+
+    loss_fn = CSSupConLoss(temperature=temperature, ambiguity_source="learned_class_affinity", ambiguity_scale=scale)
+    loss_fn.set_learned_ambiguity_matrix(matrix)
+    actual = loss_fn(embeddings, labels, num_classes=num_classes)
+
+    normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+    similarity = normalized @ normalized.T / temperature
+    row_max = similarity.max(dim=1, keepdim=True).values.detach()
+    logits = similarity - row_max
+
+    weight = torch.ones(batch_size, batch_size)
+    for i in range(batch_size):
+        for j in range(batch_size):
+            if i == j:
+                weight[i, j] = 0.0
+            elif labels[i].item() != labels[j].item():
+                weight[i, j] = 1.0 + scale * matrix[labels[i], labels[j]].item()
+
+    exp_logits = torch.exp(logits) * weight
+    denom = exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    log_prob = logits - torch.log(denom)
+
+    same_class = labels.unsqueeze(0) == labels.unsqueeze(1)
+    self_mask = torch.eye(batch_size, dtype=torch.bool)
+    positive_mask = same_class & ~self_mask
+    positive_counts = positive_mask.sum(dim=1)
+    has_positive = positive_counts > 0
+    sum_log_prob_pos = (positive_mask.to(log_prob.dtype) * log_prob).sum(dim=1)
+    safe_counts = positive_counts.clamp_min(1).to(log_prob.dtype)
+    mean_log_prob_pos = sum_log_prob_pos / safe_counts
+    loss_per_anchor = -mean_log_prob_pos
+    expected = loss_per_anchor[has_positive].mean() if bool(has_positive.any()) else embeddings.sum() * 0.0
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_learned_class_affinity_zero_matrix_matches_uniform_fixed_pairs_baseline():
+    """Test requirement #7: zero ambiguity produces normal (uniform,
+    weight=1.0) negative weighting - proven by matching it exactly against
+    fixed_pairs with no configured pairs (which is, by definition, uniform
+    weight=1.0 for every negative)."""
+    embeddings, labels = _make_batch(batch_size=8, num_classes=10, seed=5)
+    zero_matrix = torch.zeros(10, 10)
+
+    learned = CSSupConLoss(ambiguity_source="learned_class_affinity", ambiguity_scale=1.0)
+    learned.set_learned_ambiguity_matrix(zero_matrix)
+    baseline = CSSupConLoss(ambiguity_source="fixed_pairs")  # no ambiguity_pairs -> uniform weight=1.0 always
+
+    value_learned = learned(embeddings, labels, num_classes=10)
+    value_baseline = baseline(embeddings, labels, num_classes=10)
+    assert torch.allclose(value_learned, value_baseline, atol=1e-6)
+
+
+def test_learned_class_affinity_larger_matrix_value_produces_larger_weight_and_loss():
+    """Test requirement #8: larger ambiguity produces larger negative
+    weighting. Constructed so exactly one negative pair's weight differs
+    between the two matrices, isolating the effect: with a strictly larger
+    weight on that pair's contribution to the denominator, log_prob(positive)
+    strictly decreases, so the loss strictly increases."""
+    embeddings = torch.tensor(
+        [
+            [1.0, 0.0, 0.0],
+            [0.9, 0.1, 0.0],  # same class as anchor 0 (a positive for it)
+            [0.0, 0.0, 1.0],  # different class (the sole negative)
+        ]
+    )
+    labels = torch.tensor([0, 0, 1])
+
+    matrix_low = torch.zeros(2, 2)
+    matrix_low[0, 1] = matrix_low[1, 0] = 0.1
+    matrix_high = torch.zeros(2, 2)
+    matrix_high[0, 1] = matrix_high[1, 0] = 0.9
+
+    loss_low = CSSupConLoss(ambiguity_source="learned_class_affinity", ambiguity_scale=1.0)
+    loss_low.set_learned_ambiguity_matrix(matrix_low)
+    loss_high = CSSupConLoss(ambiguity_source="learned_class_affinity", ambiguity_scale=1.0)
+    loss_high.set_learned_ambiguity_matrix(matrix_high)
+
+    value_low = loss_low(embeddings, labels, num_classes=2)
+    value_high = loss_high(embeddings, labels, num_classes=2)
+    assert value_high > value_low
+
+
+def test_learned_class_affinity_matrix_must_be_square():
+    loss_fn = CSSupConLoss(ambiguity_source="learned_class_affinity", ambiguity_scale=1.0)
+    with pytest.raises(CSSupConConfigError, match="square"):
+        loss_fn.set_learned_ambiguity_matrix(torch.zeros(3, 4))
+
+
+def test_learned_class_and_learned_class_affinity_share_identical_weight_computation():
+    """Confirms the two modes are mechanically the same code path (they
+    differ only in matrix PROVENANCE, never in application) - installing
+    the SAME matrix under either name produces the SAME loss."""
+    embeddings, labels = _make_batch(batch_size=8, num_classes=10, seed=9)
+    matrix = _make_symmetric_matrix(num_classes=10, seed=10)
+
+    via_learned_class = CSSupConLoss(ambiguity_source="learned_class", ambiguity_scale=1.3)
+    via_learned_class.set_learned_ambiguity_matrix(matrix)
+    via_learned_class_affinity = CSSupConLoss(ambiguity_source="learned_class_affinity", ambiguity_scale=1.3)
+    via_learned_class_affinity.set_learned_ambiguity_matrix(matrix)
+
+    value_a = via_learned_class(embeddings, labels, num_classes=10)
+    value_b = via_learned_class_affinity(embeddings, labels, num_classes=10)
+    assert torch.allclose(value_a, value_b, atol=1e-6)
+
+
+def test_unknown_ambiguity_source_still_rejected_by_loss_constructor():
+    with pytest.raises(CSSupConConfigError, match="ambiguity_source must be"):
+        CSSupConLoss(ambiguity_source="totally_bogus")
+
+
 # --- determinism ---
 
 

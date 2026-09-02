@@ -30,6 +30,19 @@ checkpoint's embeddings over train_original.csv ONCE, before `optimizer`/
 `scheduler`/`Trainer` are ever constructed, and installs it into
 `criterion.cs_supcon_loss`. `Trainer` itself is not modified for this -
 see build_learned_class_ambiguity's own docstring for the full method.
+
+Learned class-level ambiguity, Phase 3-experimental (feature/learned-
+ambiguity, src/training/class_affinity_ambiguity_cs_supcon_setup.py):
+when cs_supcon.ambiguity_source="learned_class_affinity", this module
+performs the IDENTICAL setup (same timing, same read-only reference-
+checkpoint guarantees, same train_original.csv-only dependency, same
+CSSupConLoss.set_learned_ambiguity_matrix(...) installation point) but
+builds the frozen matrix via Phase 3's OWN, unmodified continuous class-
+affinity construction (src/training/class_affinity_ambiguity_setup.py)
+instead of Phase 1's class-prototype construction - a controlled
+experiment where the ONLY intended difference from an otherwise identical
+"learned_class" run is which pre-built matrix CS-SupCon consumes.
+
 The default `ambiguity_source="fixed_pairs"` performs none of this and
 requires no reference checkpoint - existing behavior is unchanged.
 """
@@ -46,11 +59,16 @@ from PIL import Image
 
 from src.data.dataloaders import build_eval_dataloader, build_train_dataloader
 from src.data.dataset import RetinalDataset
+from src.data.records import write_csv
 from src.data.transforms import build_transforms_from_config
 from src.losses.ambiguity import load_ambiguity_settings
 from src.losses.combined import CombinedAAEvidentNetLoss, build_combined_aa_evidentnet_loss
 from src.models.factory import create_model
 from src.training.ambiguity_setup import AmbiguitySetupError, build_learned_class_ambiguity
+from src.training.class_affinity_ambiguity_cs_supcon_setup import (
+    ClassAffinityAmbiguitySetupError,
+    build_class_affinity_ambiguity_for_cs_supcon,
+)
 from src.training.checkpointing import (
     assert_checkpoint_compatible,
     build_checkpoint,
@@ -115,6 +133,7 @@ class AAEvidentNetRunSummary:
     edl_enabled: bool
     ambiguity_source: str
     ambiguity_metadata_path: Optional[Path] = None
+    ambiguity_matrix_csv_path: Optional[Path] = None
 
 
 def _make_smoke_dataset(canonical_classes: List[str], raw_dir: Path, seed: int, n_train: int = 8, n_val: int = 4):
@@ -261,38 +280,49 @@ def run_aa_evidentnet_training(
     except Exception as e:  # noqa: BLE001 - re-raise as a project-specific, clearer error
         raise RunAAEvidentNetError(f"Failed to build the combined AA-EvidentNet training objective: {e}") from e
 
-    # --- learned class-level ambiguity (feature/learned-ambiguity, Phase
-    # 1): only engaged when configs/losses.yaml: cs_supcon.ambiguity_source
-    # is 'learned_class' AND CS-SupCon is actually enabled - otherwise this
-    # is a complete no-op (no reference checkpoint required, no prototype
+    # --- learned class-level ambiguity (feature/learned-ambiguity): only
+    # engaged when configs/losses.yaml: cs_supcon.ambiguity_source is
+    # 'learned_class' (Phase 1) or 'learned_class_affinity' (Phase 3-
+    # experimental) AND CS-SupCon is actually enabled - otherwise this is a
+    # complete no-op (no reference checkpoint required, no matrix
     # construction performed), preserving 'fixed_pairs' behavior exactly.
     # Runs entirely BEFORE the optimizer/scheduler/Trainer below are ever
-    # constructed - Trainer itself is untouched by this mechanism. ---
+    # constructed - Trainer itself is untouched by either mechanism. Both
+    # modes install their matrix into criterion.cs_supcon_loss via the
+    # IDENTICAL set_learned_ambiguity_matrix(...) call - they differ only
+    # in which builder function constructs that matrix. ---
     ambiguity_settings = load_ambiguity_settings(losses_config.get("cs_supcon", {}) or {})
     ambiguity_metadata: Optional[Dict[str, Any]] = None
-    if criterion.cs_supcon_loss is not None and ambiguity_settings.ambiguity_source == "learned_class":
+    if criterion.cs_supcon_loss is not None and ambiguity_settings.ambiguity_source in (
+        "learned_class",
+        "learned_class_affinity",
+    ):
         if smoke_test:
             raise RunAAEvidentNetError(
-                "cs_supcon.ambiguity_source='learned_class' is not supported with smoke_test=True - it "
-                "requires a real train_original.csv manifest and a real reference checkpoint, neither of "
-                "which the synthetic smoke-test dataset provides. Use smoke_test=False, or set "
-                "ambiguity_source='fixed_pairs' for a smoke test."
+                f"cs_supcon.ambiguity_source='{ambiguity_settings.ambiguity_source}' is not supported with "
+                "smoke_test=True - it requires a real train_original.csv manifest and a real reference "
+                "checkpoint, neither of which the synthetic smoke-test dataset provides. Use "
+                "smoke_test=False, or set ambiguity_source='fixed_pairs' for a smoke test."
             )
         train_original_manifest_path = manifests_dir / "train_original.csv"
+        common_kwargs = dict(
+            reference_checkpoint_path=ambiguity_settings.reference_checkpoint_path,
+            reference_model_name=ambiguity_settings.reference_model_name,
+            models_config=models_config,
+            dataset_config=dataset_config,
+            canonical_classes=canonical_classes,
+            raw_dir=raw_dir,
+            processed_train_dir=processed_train_dir,
+            train_manifest_path=train_original_manifest_path,
+            device=device,
+            batch_size=training_config.batch_size,
+            num_workers=num_workers,
+        )
         try:
-            ambiguity_artifact = build_learned_class_ambiguity(
-                reference_checkpoint_path=ambiguity_settings.reference_checkpoint_path,
-                reference_model_name=ambiguity_settings.reference_model_name,
-                models_config=models_config,
-                dataset_config=dataset_config,
-                canonical_classes=canonical_classes,
-                raw_dir=raw_dir,
-                processed_train_dir=processed_train_dir,
-                train_manifest_path=train_original_manifest_path,
-                device=device,
-                batch_size=training_config.batch_size,
-                num_workers=num_workers,
-            )
+            if ambiguity_settings.ambiguity_source == "learned_class":
+                ambiguity_artifact = build_learned_class_ambiguity(**common_kwargs)
+            else:  # "learned_class_affinity"
+                ambiguity_artifact = build_class_affinity_ambiguity_for_cs_supcon(**common_kwargs)
         except Exception as e:  # noqa: BLE001 - re-raise as a project-specific, clearer error
             raise RunAAEvidentNetError(f"Failed to build the learned class-ambiguity matrix: {e}") from e
 
@@ -307,23 +337,53 @@ def run_aa_evidentnet_training(
             "train_manifest_path": ambiguity_artifact.train_manifest_path,
             "train_manifest_sha256": ambiguity_artifact.train_manifest_sha256,
             "num_train_samples": ambiguity_artifact.num_train_samples,
-            "class_sample_counts": ambiguity_artifact.class_sample_counts,
             "class_names": ambiguity_artifact.canonical_classes,
-            "margin_normalization": {
+            "class_ambiguity_matrix": ambiguity_artifact.matrix_numpy.tolist(),
+            "matrix_frozen_confirmation": (
+                "The installed matrix is a non-trainable torch buffer (requires_grad=False); it is built "
+                "exactly once, before the optimizer/scheduler/Trainer are constructed, and is never "
+                "recomputed or updated during training."
+            ),
+            "test_data_confirmation": (
+                "data/manifests/test_original.csv was not read, referenced, or used anywhere in "
+                "constructing this matrix."
+            ),
+        }
+        if ambiguity_settings.ambiguity_source == "learned_class":
+            ambiguity_metadata["class_sample_counts"] = ambiguity_artifact.class_sample_counts
+            ambiguity_metadata["margin_normalization"] = {
                 "margin_min": ambiguity_artifact.margin_normalization.margin_min,
                 "margin_max": ambiguity_artifact.margin_normalization.margin_max,
                 "fit_on": "train_original.csv",
-            },
-            "class_ambiguity_matrix": ambiguity_artifact.matrix_numpy.tolist(),
-            "methodological_caveat": (
+            }
+            ambiguity_metadata["matrix_construction_method"] = (
+                "phase1_class_prototype_cosine_similarity: A[a,b] = max(0, cosine_similarity(P_a, P_b)), "
+                "P_k = mean fused embedding of class k over train_original.csv (see src/losses/ambiguity.py)"
+            )
+            ambiguity_metadata["methodological_caveat"] = (
                 "This reference checkpoint's embedding space was itself shaped by the EXISTING "
                 "fixed-hard-pair CS-SupCon objective (ambiguity_weight on 3 clinician-picked pairs). The "
                 "learned matrix therefore reflects class geometry AFTER that existing correction has "
                 "already partially acted - it is not claimed to be a from-scratch, assumption-free "
                 "measurement of natural class confusability, and is not claimed to be independent of the "
                 "previous ambiguity mechanism."
-            ),
-        }
+            )
+        else:  # "learned_class_affinity"
+            ambiguity_metadata["m"] = ambiguity_artifact.m
+            ambiguity_metadata["temperature"] = ambiguity_artifact.temperature
+            ambiguity_metadata["scale_percentile"] = ambiguity_artifact.scale_percentile
+            ambiguity_metadata["matrix_construction_method"] = ambiguity_artifact.matrix_construction_method
+            ambiguity_metadata["methodological_caveat"] = (
+                "This reference checkpoint's embedding space was itself shaped by the EXISTING "
+                "fixed-hard-pair CS-SupCon objective (ambiguity_weight on 3 clinician-picked pairs). The "
+                "learned matrix therefore reflects class geometry AFTER that existing correction has "
+                "already partially acted - it is not claimed to be a from-scratch, assumption-free "
+                "measurement of natural class confusability, and is not claimed to be independent of the "
+                "previous ambiguity mechanism. It is also derived from the SAME reference checkpoint/"
+                "representation as Phase 3's validation analysis (see REPRODUCIBILITY.md) - this "
+                "experimental training run does not, by itself, prove or disprove any performance "
+                "difference; that requires an actual controlled training comparison, not yet performed."
+            )
 
     optimizer = build_optimizer(model, training_config)
     scheduler = build_scheduler(optimizer, training_config)
@@ -374,6 +434,7 @@ def run_aa_evidentnet_training(
         f"edl_enabled={criterion.edl_loss_module is not None} edl_weight={criterion.edl_weight}"
     )
     ambiguity_metadata_path: Optional[Path] = None
+    ambiguity_matrix_csv_path: Optional[Path] = None
     logger.log(f"ambiguity_source={ambiguity_settings.ambiguity_source}")
     if ambiguity_metadata is not None:
         logger.log(
@@ -382,11 +443,34 @@ def run_aa_evidentnet_training(
             f"(sha256={ambiguity_metadata['reference_checkpoint_sha256'][:12]}...) over "
             f"train_original.csv ({ambiguity_metadata['num_train_samples']} samples)"
         )
+        ambiguity_matrix_csv_path = run_dir / "ambiguity_class_matrix.csv"
+        matrix_rows = []
+        for i, name in enumerate(ambiguity_metadata["class_names"]):
+            row = {"class_name": name}
+            for j, other_name in enumerate(ambiguity_metadata["class_names"]):
+                row[other_name] = float(ambiguity_metadata["class_ambiguity_matrix"][i][j])
+            matrix_rows.append(row)
+        write_csv(matrix_rows, ["class_name"] + list(ambiguity_metadata["class_names"]), ambiguity_matrix_csv_path)
+        ambiguity_metadata["class_ambiguity_matrix_csv_path"] = str(ambiguity_matrix_csv_path)
+
         ambiguity_metadata_path = run_dir / "ambiguity_metadata.json"
         with open(ambiguity_metadata_path, "w", encoding="utf-8") as f:
             json.dump(ambiguity_metadata, f, indent=2, sort_keys=True)
     if resume_from is not None:
         logger.log(f"resumed from checkpoint: {resume_from} (start_epoch={start_epoch})")
+
+    # Tag the registry row explicitly whenever this is NOT the default
+    # fixed_pairs run, so a learned-ambiguity experimental run (Phase 1's
+    # "learned_class" or Phase 3-experimental's "learned_class_affinity")
+    # is identifiable directly from experiments/registry.csv without
+    # having to open this run's ambiguity_metadata.json.
+    ambiguity_tag = (
+        f"ambiguity_source={ambiguity_settings.ambiguity_source}"
+        if ambiguity_settings.ambiguity_source != "fixed_pairs"
+        else ""
+    )
+    base_notes = "smoke_test" if smoke_test else run_notes
+    registry_notes = " ".join(part for part in (base_notes, ambiguity_tag) if part)
 
     register_run(
         experiment_id=run_id,
@@ -396,7 +480,7 @@ def run_aa_evidentnet_training(
         checkpoint="",
         test_result="",
         status=STATUS_RUNNING,
-        notes="smoke_test" if smoke_test else run_notes,
+        notes=registry_notes,
         registry_path=registry_path,
     )
 
@@ -499,7 +583,7 @@ def run_aa_evidentnet_training(
         registry_path=registry_path,
         status=STATUS_COMPLETED,
         checkpoint=str(best_checkpoint_path) if best_checkpoint_path else "",
-        notes="smoke_test" if smoke_test else run_notes,
+        notes=registry_notes,
     )
     logger.close()
 
@@ -525,4 +609,5 @@ def run_aa_evidentnet_training(
         edl_enabled=criterion.edl_loss_module is not None,
         ambiguity_source=ambiguity_settings.ambiguity_source,
         ambiguity_metadata_path=ambiguity_metadata_path,
+        ambiguity_matrix_csv_path=ambiguity_matrix_csv_path,
     )

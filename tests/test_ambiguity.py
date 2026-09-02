@@ -262,8 +262,8 @@ def test_default_ambiguity_source_is_fixed_pairs():
     assert settings.reference_model_name == DEFAULT_REFERENCE_MODEL_NAME
 
 
-def test_valid_ambiguity_sources_are_exactly_two():
-    assert VALID_AMBIGUITY_SOURCES == ("fixed_pairs", "learned_class")
+def test_valid_ambiguity_sources_are_exactly_three():
+    assert VALID_AMBIGUITY_SOURCES == ("fixed_pairs", "learned_class", "learned_class_affinity")
 
 
 def test_learned_class_sample_is_recognized_but_rejected():
@@ -301,6 +301,49 @@ def test_learned_class_accepts_valid_config():
     assert settings.ambiguity_scale == 2.5
     assert settings.reference_checkpoint_path == "results/checkpoints/run1/best.pt"
     assert settings.reference_model_name == "aa_evidentnet"
+
+
+# --- learned_class_affinity (feature/learned-ambiguity, Phase 3-experimental):
+# same requirements/behavior as learned_class, mirrored exactly - the two
+# differ only in which upstream module builds the matrix they end up
+# installing, never in how load_ambiguity_settings validates them. ---
+
+
+def test_learned_class_affinity_requires_reference_checkpoint_path():
+    with pytest.raises(AmbiguityConfigError, match="reference_checkpoint_path is required"):
+        load_ambiguity_settings({"ambiguity_source": "learned_class_affinity"})
+
+
+def test_learned_class_affinity_rejects_non_positive_ambiguity_scale():
+    with pytest.raises(AmbiguityConfigError, match="ambiguity_scale must be > 0"):
+        load_ambiguity_settings(
+            {"ambiguity_source": "learned_class_affinity", "reference_checkpoint_path": "x.pt", "ambiguity_scale": 0.0}
+        )
+
+
+def test_learned_class_affinity_accepts_valid_config():
+    settings = load_ambiguity_settings(
+        {
+            "ambiguity_source": "learned_class_affinity",
+            "reference_checkpoint_path": "results/checkpoints/run1/best.pt",
+            "reference_model_name": "aa_evidentnet",
+            "ambiguity_scale": 1.0,
+        }
+    )
+    assert settings.ambiguity_source == "learned_class_affinity"
+    assert settings.ambiguity_scale == 1.0
+    assert settings.reference_checkpoint_path == "results/checkpoints/run1/best.pt"
+    assert settings.reference_model_name == "aa_evidentnet"
+
+
+def test_learned_class_affinity_reuses_the_same_default_ambiguity_scale_as_learned_class():
+    # Reusing the SAME predetermined default (never a separately invented
+    # or tuned value for the new mode) is a hard requirement of this
+    # experiment's design - see configs/losses.yaml's comment.
+    settings = load_ambiguity_settings(
+        {"ambiguity_source": "learned_class_affinity", "reference_checkpoint_path": "x.pt"}
+    )
+    assert settings.ambiguity_scale == DEFAULT_AMBIGUITY_SCALE == 1.0
 
 
 def test_fixed_pairs_does_not_require_reference_checkpoint_path():

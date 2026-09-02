@@ -27,6 +27,7 @@ from src.losses.cs_supcon import CSSupConLoss
 from src.models.factory import create_model
 from src.training.ambiguity_setup import LearnedAmbiguityArtifact
 from src.training.checkpointing import build_checkpoint, save_checkpoint
+from src.training.class_affinity_ambiguity_cs_supcon_setup import ClassAffinityAmbiguityCSSupConArtifact
 from src.training.run_aa_evidentnet import RunAAEvidentNetError, run_aa_evidentnet_training
 from tests.conftest import make_image, write_min_dataset_config, write_min_losses_config, write_min_models_config, write_min_training_config
 
@@ -274,3 +275,241 @@ def test_learned_class_incompatible_reference_checkpoint_fails_clearly(tmp_path)
             losses_config_path=losses_cfg, registry_path=registry_path, smoke_test=False,
             max_train_steps_per_epoch=1, max_val_steps_per_epoch=1,
         )
+
+
+# --- learned_class_affinity (feature/learned-ambiguity, Phase 3-
+# experimental): mirrors every "learned_class" test above exactly - the
+# ONLY intended difference is which builder function is called and which
+# artifact type is installed, never the timing, the read-only reference-
+# checkpoint guarantees, or the train_original.csv-only dependency. ---
+
+
+def test_learned_class_affinity_builds_matrix_before_training_and_installs_it(tmp_path, monkeypatch):
+    dataset_cfg, models_cfg, training_cfg, losses_cfg_base, registry_path, manifests_dir = _tmp_configs(
+        tmp_path, n_per_class=2
+    )
+    checkpoint_path = _build_reference_checkpoint(tmp_path, models_cfg, num_classes=10)
+    losses_cfg = write_min_losses_config(
+        tmp_path,
+        CANONICAL_CLASSES,
+        overrides={
+            "cs_supcon": {"ambiguity_source": "learned_class_affinity", "reference_checkpoint_path": str(checkpoint_path)}
+        },
+        config_name="losses_learned_affinity.yaml",
+    )
+
+    assert not (manifests_dir / "test_original.csv").exists()
+
+    import src.training.run_aa_evidentnet as raan
+
+    setup_calls = []
+    original_build = raan.build_class_affinity_ambiguity_for_cs_supcon
+
+    def spy_build(*args, **kwargs):
+        artifact = original_build(*args, **kwargs)
+        setup_calls.append(artifact)
+        return artifact
+
+    install_calls = []
+    original_set_matrix = CSSupConLoss.set_learned_ambiguity_matrix
+
+    def spy_set_matrix(self, matrix):
+        install_calls.append(matrix.shape)
+        return original_set_matrix(self, matrix)
+
+    # build_learned_class_ambiguity (Phase 1's builder) must NEVER be
+    # called for this ambiguity_source.
+    phase1_calls = []
+    monkeypatch.setattr(raan, "build_learned_class_ambiguity", lambda *a, **kw: phase1_calls.append(1))
+    monkeypatch.setattr(raan, "build_class_affinity_ambiguity_for_cs_supcon", spy_build)
+    monkeypatch.setattr(CSSupConLoss, "set_learned_ambiguity_matrix", spy_set_matrix)
+
+    fit_calls = []
+    original_fit = raan.Trainer.fit
+
+    def spy_fit(self, *a, **kw):
+        fit_calls.append(len(setup_calls))
+        return original_fit(self, *a, **kw)
+
+    monkeypatch.setattr(raan.Trainer, "fit", spy_fit)
+
+    summary = run_aa_evidentnet_training(
+        dataset_config_path=dataset_cfg, models_config_path=models_cfg, training_config_path=training_cfg,
+        losses_config_path=losses_cfg, registry_path=registry_path, smoke_test=False,
+        max_train_steps_per_epoch=1, max_val_steps_per_epoch=1,
+    )
+
+    assert phase1_calls == []  # Phase 1's builder never called
+    assert len(setup_calls) == 1  # built exactly once
+    assert isinstance(setup_calls[0], ClassAffinityAmbiguityCSSupConArtifact)
+    assert len(install_calls) == 1
+    assert install_calls[0] == (10, 10)
+    assert fit_calls == [1]  # setup had already run by the time Trainer.fit() started
+
+    assert summary.ambiguity_source == "learned_class_affinity"
+    assert summary.ambiguity_metadata_path is not None
+    assert summary.ambiguity_metadata_path.is_file()
+    assert summary.ambiguity_matrix_csv_path is not None
+    assert summary.ambiguity_matrix_csv_path.is_file()
+
+    with open(summary.ambiguity_metadata_path, encoding="utf-8") as f:
+        metadata = json.load(f)
+    assert metadata["ambiguity_source"] == "learned_class_affinity"
+    assert metadata["reference_checkpoint_path"] == str(checkpoint_path)
+    assert len(metadata["class_ambiguity_matrix"]) == 10
+    assert metadata["train_manifest_path"].endswith("train_original.csv")
+    assert metadata["m"] == 5
+    assert "matrix_construction_method" in metadata
+    assert "phase3_class_affinity_matrix" in metadata["matrix_construction_method"]
+    assert "matrix_frozen_confirmation" in metadata
+    assert "test_data_confirmation" in metadata
+    assert "methodological_caveat" in metadata
+    assert "class_ambiguity_matrix_csv_path" in metadata
+    # Phase 1-only fields must NOT leak into this mode's metadata.
+    assert "class_sample_counts" not in metadata
+    assert "margin_normalization" not in metadata
+    assert not (manifests_dir / "test_original.csv").exists()  # never created by this run
+
+    registry_rows = []
+    with open(registry_path, newline="", encoding="utf-8") as f:
+        registry_rows = list(csv.DictReader(f))
+    assert "ambiguity_source=learned_class_affinity" in registry_rows[0]["notes"]
+
+
+def test_smoke_test_with_learned_class_affinity_raises_explicit_error(tmp_path):
+    checkpoint_placeholder = tmp_path / "does_not_need_to_exist.pt"
+    dataset_cfg, models_cfg, training_cfg, losses_cfg_base, registry_path, manifests_dir = _tmp_configs(tmp_path)
+    losses_cfg = write_min_losses_config(
+        tmp_path,
+        CANONICAL_CLASSES,
+        overrides={
+            "cs_supcon": {
+                "ambiguity_source": "learned_class_affinity",
+                "reference_checkpoint_path": str(checkpoint_placeholder),
+            }
+        },
+        config_name="losses_smoke_learned_affinity.yaml",
+    )
+
+    with pytest.raises(RunAAEvidentNetError, match="smoke_test"):
+        run_aa_evidentnet_training(
+            dataset_config_path=dataset_cfg, models_config_path=models_cfg, training_config_path=training_cfg,
+            losses_config_path=losses_cfg, registry_path=registry_path, smoke_test=True,
+        )
+
+
+def test_learned_class_affinity_without_reference_checkpoint_path_fails_clearly(tmp_path):
+    dataset_cfg, models_cfg, training_cfg, losses_cfg_base, registry_path, manifests_dir = _tmp_configs(tmp_path)
+    losses_cfg = write_min_losses_config(
+        tmp_path, CANONICAL_CLASSES, overrides={"cs_supcon": {"ambiguity_source": "learned_class_affinity"}},
+        config_name="losses_missing_ref_affinity.yaml",
+    )
+
+    with pytest.raises(RunAAEvidentNetError, match="reference_checkpoint_path"):
+        run_aa_evidentnet_training(
+            dataset_config_path=dataset_cfg, models_config_path=models_cfg, training_config_path=training_cfg,
+            losses_config_path=losses_cfg, registry_path=registry_path, smoke_test=True,
+        )
+
+
+def test_learned_class_affinity_missing_train_original_manifest_fails_clearly(tmp_path):
+    dataset_cfg, models_cfg, training_cfg, losses_cfg_base, registry_path, manifests_dir = _tmp_configs(
+        tmp_path, write_train_original=False
+    )
+    checkpoint_path = _build_reference_checkpoint(tmp_path, models_cfg, num_classes=10)
+    losses_cfg = write_min_losses_config(
+        tmp_path,
+        CANONICAL_CLASSES,
+        overrides={
+            "cs_supcon": {"ambiguity_source": "learned_class_affinity", "reference_checkpoint_path": str(checkpoint_path)}
+        },
+        config_name="losses_missing_manifest_affinity.yaml",
+    )
+
+    assert not (manifests_dir / "train_original.csv").exists()
+
+    with pytest.raises(RunAAEvidentNetError, match="train_original.csv"):
+        run_aa_evidentnet_training(
+            dataset_config_path=dataset_cfg, models_config_path=models_cfg, training_config_path=training_cfg,
+            losses_config_path=losses_cfg, registry_path=registry_path, smoke_test=False,
+            max_train_steps_per_epoch=1, max_val_steps_per_epoch=1,
+        )
+
+
+def test_learned_class_affinity_incompatible_reference_checkpoint_fails_clearly(tmp_path):
+    dataset_cfg, models_cfg, training_cfg, losses_cfg_base, registry_path, manifests_dir = _tmp_configs(tmp_path)
+    checkpoint_path = _build_reference_checkpoint(tmp_path, models_cfg, num_classes=3)
+    losses_cfg = write_min_losses_config(
+        tmp_path,
+        CANONICAL_CLASSES,
+        overrides={
+            "cs_supcon": {"ambiguity_source": "learned_class_affinity", "reference_checkpoint_path": str(checkpoint_path)}
+        },
+        config_name="losses_bad_ref_affinity.yaml",
+    )
+
+    with pytest.raises(RunAAEvidentNetError):
+        run_aa_evidentnet_training(
+            dataset_config_path=dataset_cfg, models_config_path=models_cfg, training_config_path=training_cfg,
+            losses_config_path=losses_cfg, registry_path=registry_path, smoke_test=False,
+            max_train_steps_per_epoch=1, max_val_steps_per_epoch=1,
+        )
+
+
+def test_experimental_model_is_freshly_initialized_not_loaded_from_reference_checkpoint(tmp_path, monkeypatch):
+    """Test requirement #16 / research constraint: the experimental model
+    must be independently, freshly initialized - never a copy of, or
+    initialized from, the reference checkpoint used to build the matrix."""
+    dataset_cfg, models_cfg, training_cfg, losses_cfg_base, registry_path, manifests_dir = _tmp_configs(
+        tmp_path, n_per_class=2
+    )
+    checkpoint_path = _build_reference_checkpoint(tmp_path, models_cfg, num_classes=10)
+    losses_cfg = write_min_losses_config(
+        tmp_path,
+        CANONICAL_CLASSES,
+        overrides={
+            "cs_supcon": {"ambiguity_source": "learned_class_affinity", "reference_checkpoint_path": str(checkpoint_path)}
+        },
+        config_name="losses_fresh_init.yaml",
+    )
+
+    import src.training.class_affinity_ambiguity_setup as phase3_setup
+    import src.training.run_aa_evidentnet as raan
+
+    experimental_models = []
+    original_create_model_raan = raan.create_model
+
+    def spy_create_model_experimental(*args, **kwargs):
+        model = original_create_model_raan(*args, **kwargs)
+        experimental_models.append(model)
+        return model
+
+    reference_models = []
+    original_create_model_phase3 = phase3_setup.create_model
+
+    def spy_create_model_reference(*args, **kwargs):
+        model = original_create_model_phase3(*args, **kwargs)
+        reference_models.append(model)
+        return model
+
+    monkeypatch.setattr(raan, "create_model", spy_create_model_experimental)
+    monkeypatch.setattr(phase3_setup, "create_model", spy_create_model_reference)
+
+    run_aa_evidentnet_training(
+        dataset_config_path=dataset_cfg, models_config_path=models_cfg, training_config_path=training_cfg,
+        losses_config_path=losses_cfg, registry_path=registry_path, smoke_test=False,
+        max_train_steps_per_epoch=1, max_val_steps_per_epoch=1,
+    )
+
+    # Two INDEPENDENT model instances are created: one for the experimental
+    # model being trained (run_aa_evidentnet.py's own create_model call),
+    # one for the reference checkpoint's throwaway model (inside
+    # build_class_affinity_ambiguity_for_cs_supcon's call to
+    # build_class_affinity_ambiguity, in a completely different module).
+    # Neither is initialized from the other's weights.
+    assert len(experimental_models) == 1
+    assert len(reference_models) == 1
+    assert experimental_models[0] is not reference_models[0]
+    experimental_param = next(experimental_models[0].parameters())
+    reference_param = next(reference_models[0].parameters())
+    assert experimental_param.data_ptr() != reference_param.data_ptr()

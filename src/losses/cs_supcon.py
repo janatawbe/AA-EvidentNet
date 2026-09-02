@@ -41,14 +41,19 @@ gradients).
 `ambiguity_source` (feature/learned-ambiguity, Phase 1, see
 src/losses/ambiguity.py) generalizes the `w(i, a)` formula above: the
 default `ambiguity_source="fixed_pairs"` is EXACTLY the formulation
-above, unchanged; `ambiguity_source="learned_class"` replaces the binary
-`{ambiguity_weight, 1.0}` lookup with a continuous
+above, unchanged; `ambiguity_source="learned_class"` (Phase 1's class-
+PROTOTYPE cosine-similarity matrix) and `ambiguity_source=
+"learned_class_affinity"` (Phase 3's continuous class-affinity matrix -
+feature/learned-ambiguity, Phase 3-experimental) both replace the binary
+`{ambiguity_weight, 1.0}` lookup with the IDENTICAL continuous
 `w(i,a) = 1 + ambiguity_scale * A[y_i, y_a]` for negatives, where `A` is a
 frozen, non-trainable K x K matrix installed via
 `set_learned_ambiguity_matrix(...)` before the first `forward()` call in
-that mode. Everything else in this module (positive handling, self-
-masking, log-sum-exp stability, embedding normalization, temperature) is
-identical between the two modes.
+either mode - the two modes differ only in how `A` was constructed
+upstream (which matrix a caller chooses to install), never in how this
+module applies it. Everything else in this module (positive handling,
+self-masking, log-sum-exp stability, embedding normalization,
+temperature) is identical across all three modes.
 """
 
 from dataclasses import dataclass
@@ -213,12 +218,17 @@ class CSSupConLoss(nn.Module):
         below changes positive handling, self-masking, log-sum-exp
         stability, embedding normalization, or temperature behavior for
         this mode.
-      - "learned_class": `w(i,a) = 1 + ambiguity_scale * A[y_i, y_a]` for
-        negatives, using a frozen, non-trainable class-ambiguity matrix
-        `A` that must be supplied via `set_learned_ambiguity_matrix(...)`
-        before the first `forward()` call in this mode - calling
-        `forward()` without one raises CSSupConConfigError rather than
-        silently falling back to uniform weighting.
+      - "learned_class" or "learned_class_affinity": `w(i,a) = 1 +
+        ambiguity_scale * A[y_i, y_a]` for negatives, using a frozen,
+        non-trainable class-ambiguity matrix `A` that must be supplied via
+        `set_learned_ambiguity_matrix(...)` before the first `forward()`
+        call in either mode - calling `forward()` without one raises
+        CSSupConConfigError rather than silently falling back to uniform
+        weighting. The two names exist only to make an experiment's matrix
+        PROVENANCE explicit in config/metadata (Phase 1 class-prototype
+        matrix vs. Phase 3 class-affinity matrix) - this class applies the
+        identical formula to whichever matrix was installed, in either
+        mode.
     """
 
     def __init__(
@@ -234,11 +244,12 @@ class CSSupConLoss(nn.Module):
             raise CSSupConConfigError(f"temperature must be > 0, got {temperature}")
         if ambiguity_weight <= 0:
             raise CSSupConConfigError(f"ambiguity_weight must be > 0, got {ambiguity_weight}")
-        if ambiguity_source not in ("fixed_pairs", "learned_class"):
+        if ambiguity_source not in ("fixed_pairs", "learned_class", "learned_class_affinity"):
             raise CSSupConConfigError(
-                f"ambiguity_source must be 'fixed_pairs' or 'learned_class', got '{ambiguity_source}'"
+                f"ambiguity_source must be 'fixed_pairs', 'learned_class', or 'learned_class_affinity', "
+                f"got '{ambiguity_source}'"
             )
-        if ambiguity_source == "learned_class" and ambiguity_scale <= 0:
+        if ambiguity_source in ("learned_class", "learned_class_affinity") and ambiguity_scale <= 0:
             raise CSSupConConfigError(f"ambiguity_scale must be > 0, got {ambiguity_scale}")
         self.temperature = temperature
         self.ambiguity_weight = ambiguity_weight
@@ -258,15 +269,18 @@ class CSSupConLoss(nn.Module):
         )
 
     def set_learned_ambiguity_matrix(self, matrix: torch.Tensor) -> None:
-        """Install the frozen class-ambiguity matrix `A` (see
-        src/losses/ambiguity.py: compute_class_ambiguity_matrix /
-        class_ambiguity_matrix_to_buffer) for `ambiguity_source=
-        "learned_class"`. Registered as a buffer (`requires_grad=False`,
-        moves with `.to(device)`, never touched by an optimizer or
-        backward pass) rather than a plain attribute - `matrix` itself is
-        cloned/detached defensively so this module never accidentally
-        shares (and could be surprised by external mutation of) the
-        caller's own tensor."""
+        """Install the frozen class-ambiguity matrix `A` for
+        `ambiguity_source="learned_class"` (see src/losses/ambiguity.py:
+        compute_class_ambiguity_matrix / class_ambiguity_matrix_to_buffer)
+        or `ambiguity_source="learned_class_affinity"` (see
+        src/losses/class_affinity_ambiguity.py: compute_class_affinity_matrix,
+        wrapped via src/training/class_affinity_ambiguity_cs_supcon_setup.py)
+        - this method itself is agnostic to which of the two produced
+        `matrix`. Registered as a buffer (`requires_grad=False`, moves with
+        `.to(device)`, never touched by an optimizer or backward pass)
+        rather than a plain attribute - `matrix` itself is cloned/detached
+        defensively so this module never accidentally shares (and could be
+        surprised by external mutation of) the caller's own tensor."""
         if matrix.dim() != 2 or matrix.shape[0] != matrix.shape[1]:
             raise CSSupConConfigError(f"learned ambiguity matrix must be square [K, K], got shape {tuple(matrix.shape)}")
         self.register_buffer("learned_ambiguity_matrix", matrix.detach().clone().requires_grad_(False))
@@ -323,15 +337,18 @@ class CSSupConLoss(nn.Module):
                         if i != j and labels_list[i] != labels_list[j] and self.ambiguity_pairs.contains(labels_list[i], labels_list[j]):
                             ambiguous_negative[i, j] = True
                 weight = torch.where(ambiguous_negative, torch.full_like(weight, self.ambiguity_weight), weight)
-        elif self.ambiguity_source == "learned_class":
+        elif self.ambiguity_source in ("learned_class", "learned_class_affinity"):
             # w(i,a) = 1 + ambiguity_scale * A[y_i, y_a] for negatives
             # (label_i != label_a); positives (same class) and self stay
             # at weight 1.0 here, exactly like the fixed_pairs branch -
-            # self is masked to 0.0 below regardless.
+            # self is masked to 0.0 below regardless. Identical for both
+            # "learned_class" and "learned_class_affinity" - only the
+            # matrix installed via set_learned_ambiguity_matrix(...)
+            # differs between the two, never this computation.
             if not self._has_learned_matrix:
                 raise CSSupConConfigError(
-                    "ambiguity_source='learned_class' requires set_learned_ambiguity_matrix(...) to be called "
-                    "before forward() - refusing to silently fall back to uniform weighting"
+                    f"ambiguity_source='{self.ambiguity_source}' requires set_learned_ambiguity_matrix(...) to be "
+                    "called before forward() - refusing to silently fall back to uniform weighting"
                 )
             matrix = self.learned_ambiguity_matrix.to(device=device, dtype=embeddings.dtype)
             label_indices = labels.long()

@@ -83,7 +83,7 @@ from typing import Any, Dict
 import numpy as np
 import torch
 
-VALID_AMBIGUITY_SOURCES = ("fixed_pairs", "learned_class")
+VALID_AMBIGUITY_SOURCES = ("fixed_pairs", "learned_class", "learned_class_affinity")
 
 DEFAULT_AMBIGUITY_SCALE = 1.0
 
@@ -122,11 +122,19 @@ def load_ambiguity_settings(cs_supcon_section: Dict[str, Any]) -> AmbiguitySetti
     silently falling back to a different mode.
 
     `reference_checkpoint_path` (the existing, already-frozen AA-EvidentNet
-    checkpoint used to build the learned class-ambiguity matrix - see
-    src/training/ambiguity_setup.py) is REQUIRED when
-    `ambiguity_source == 'learned_class'` - there is no meaningful default,
-    and silently proceeding without one would mean silently skipping the
-    entire mechanism rather than failing loudly."""
+    checkpoint used to build the learned class-ambiguity matrix) is
+    REQUIRED when `ambiguity_source` is `'learned_class'` (Phase 1's class-
+    PROTOTYPE cosine-similarity matrix - see src/training/ambiguity_setup.py)
+    or `'learned_class_affinity'` (Phase 3's continuous class-affinity
+    matrix, reused unmodified from src/training/class_affinity_ambiguity_setup.py
+    - see src/training/class_affinity_ambiguity_cs_supcon_setup.py for the
+    thin wrapper that installs it into CS-SupCon) - there is no meaningful
+    default for either, and silently proceeding without one would mean
+    silently skipping the entire mechanism rather than failing loudly. Both
+    modes share the SAME `ambiguity_scale` field and the SAME
+    `w(i,a) = 1 + ambiguity_scale * A[y_i, y_a]` formula in
+    src/losses/cs_supcon.py - they differ only in how the frozen matrix `A`
+    was constructed, never in how it is applied."""
     ambiguity_source = cs_supcon_section.get("ambiguity_source", "fixed_pairs") or "fixed_pairs"
     ambiguity_scale = float(cs_supcon_section.get("ambiguity_scale", DEFAULT_AMBIGUITY_SCALE))
     reference_checkpoint_path = cs_supcon_section.get("reference_checkpoint_path")
@@ -143,14 +151,14 @@ def load_ambiguity_settings(cs_supcon_section: Dict[str, Any]) -> AmbiguitySetti
             f"cs_supcon.ambiguity_source='{ambiguity_source}' is not recognized. "
             f"Valid values: {VALID_AMBIGUITY_SOURCES}."
         )
-    if ambiguity_source == "learned_class":
+    if ambiguity_source in ("learned_class", "learned_class_affinity"):
         if ambiguity_scale <= 0:
             raise AmbiguityConfigError(f"cs_supcon.ambiguity_scale must be > 0, got {ambiguity_scale}")
         if not reference_checkpoint_path:
             raise AmbiguityConfigError(
-                "cs_supcon.reference_checkpoint_path is required when ambiguity_source='learned_class' "
+                f"cs_supcon.reference_checkpoint_path is required when ambiguity_source='{ambiguity_source}' "
                 "(the existing, already-frozen AA-EvidentNet checkpoint used to build the class-ambiguity "
-                "matrix - see src/training/ambiguity_setup.py). Refusing to silently skip the mechanism."
+                "matrix). Refusing to silently skip the mechanism."
             )
 
     return AmbiguitySettings(
