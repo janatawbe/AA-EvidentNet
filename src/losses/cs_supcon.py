@@ -37,6 +37,18 @@ see _NO_POSITIVE handling below — rather than producing NaN/Inf).
 Numerically stable via the standard log-sum-exp trick (subtract each
 row's max similarity before exponentiating, detached so it doesn't affect
 gradients).
+
+`ambiguity_source` (feature/learned-ambiguity, Phase 1, see
+src/losses/ambiguity.py) generalizes the `w(i, a)` formula above: the
+default `ambiguity_source="fixed_pairs"` is EXACTLY the formulation
+above, unchanged; `ambiguity_source="learned_class"` replaces the binary
+`{ambiguity_weight, 1.0}` lookup with a continuous
+`w(i,a) = 1 + ambiguity_scale * A[y_i, y_a]` for negatives, where `A` is a
+frozen, non-trainable K x K matrix installed via
+`set_learned_ambiguity_matrix(...)` before the first `forward()` call in
+that mode. Everything else in this module (positive handling, self-
+masking, log-sum-exp stability, embedding normalization, temperature) is
+identical between the two modes.
 """
 
 from dataclasses import dataclass

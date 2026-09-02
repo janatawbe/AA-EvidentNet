@@ -50,7 +50,7 @@ from src.losses.ambiguity import (
     fit_margin_normalization,
 )
 from src.models.factory import create_model
-from src.models.prototypes import compute_class_prototypes
+from src.models.prototypes import PrototypeComputationError, compute_class_prototypes
 from src.training.checkpointing import assert_checkpoint_compatible, load_checkpoint, restore_training_state
 from src.utils.hashing import hash_file
 
@@ -60,10 +60,11 @@ DEFAULT_NUM_WORKERS = 0
 
 class AmbiguitySetupError(Exception):
     """Raised for a problem building the frozen learned class-ambiguity
-    matrix: a missing/incompatible reference checkpoint, or a missing
-    train_original.csv. Checkpoint incompatibility beyond a missing file
-    is raised by the reused `assert_checkpoint_compatible` as
-    `CheckpointIncompatibleError`, not wrapped here."""
+    matrix: a missing train_original.csv, or a class with zero samples in
+    it (re-raised from `src.models.prototypes.PrototypeComputationError`).
+    Checkpoint incompatibility is raised by the reused
+    `assert_checkpoint_compatible` as `CheckpointIncompatibleError`, not
+    wrapped here."""
 
 
 @dataclass
@@ -148,7 +149,10 @@ def build_learned_class_ambiguity(
     )
     loader = build_eval_dataloader(train_dataset, batch_size=batch_size, num_workers=num_workers)
 
-    prototypes, class_sample_counts = compute_class_prototypes(reference_model, loader, device, num_classes)
+    try:
+        prototypes, class_sample_counts = compute_class_prototypes(reference_model, loader, device, num_classes)
+    except PrototypeComputationError as e:
+        raise AmbiguitySetupError(str(e)) from e
     matrix_numpy = compute_class_ambiguity_matrix(prototypes)
     matrix_buffer = class_ambiguity_matrix_to_buffer(matrix_numpy)
 

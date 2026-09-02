@@ -765,6 +765,73 @@ final-test result (87.90% accuracy) is unaffected.
   real severity-vs-score figure) is a separate, later step for whoever
   holds that checkpoint.
 
+## Learned class-level ambiguity reproducibility (`feature/learned-ambiguity`, Phase 1)
+
+**A new experimental research direction**, developed on its own branch (`feature/learned-ambiguity`), never merged into or affecting `master`. Not a novelty claim — only a statement that this mechanism did not previously exist in this repository under any name (a check was made: the only overlapping prior logic was `ood_uncertainty.py`'s prototype computation, relocated and shared rather than duplicated - see below).
+
+**Four deliberately separate concepts, never combined into one score**: class-level ambiguity (a static K×K matrix - "which classes generally overlap"), sample-level ambiguity (a per-image scalar - "which class does *this* image resemble", analysis-only in this phase), EDL uncertainty (`src/losses/evidential.py`, unmodified), and OOD (`src/evaluation/ood_uncertainty.py`, unmodified). The class matrix is deliberately built from embedding geometry alone, **never from a confusion matrix or model predictions** - a confusion-matrix-based construction would conflate "these classes look alike" with "the model gets these wrong," collapsing the ambiguity/uncertainty distinction this design exists to preserve.
+
+### Shared prototype utilities (behavior-preserving relocation)
+
+`src/models/prototypes.py` is a new, dependency-free module holding `compute_class_prototypes` and `nearest_prototype_cosine_distance` - relocated out of `src/evaluation/ood_uncertainty.py`, which previously defined them inline. `ood_uncertainty.py` now contains thin wrapper functions of the same names that delegate to the shared module and re-raise its `PrototypeComputationError` as `OODUncertaintyError` (identical message), so its public API and error contract are byte-for-byte unchanged. **Verified**: all 45 pre-existing `tests/test_ood_uncertainty.py` tests pass unmodified after the refactor - no OOD calculation, output schema, or error message changed. `tests/test_prototypes.py` (10 tests) covers the relocated module directly, including a determinism check (two calls with identical inputs produce identical prototypes) not previously tested in isolation.
+
+### Class-level ambiguity: exact construction and reference representation
+
+```
+P_k    = mean fused embedding of class k, over train_original.csv ONLY
+S(a,b) = cosine_similarity(P_a, P_b)
+A[a,b] = max(0, S(a,b))   for a != b   (rectified, [0,1], symmetric)
+A[a,a] = 0                              (diagonal, explicit, never queried)
+```
+
+`src/losses/ambiguity.py: compute_class_ambiguity_matrix` implements exactly this - pure math, no I/O, matching `cs_supcon.py`/`evidential.py`'s existing purity convention. The matrix is converted to a non-trainable `torch.Tensor` (`class_ambiguity_matrix_to_buffer`, `requires_grad=False`) and installed into `CSSupConLoss` via `register_buffer` (`set_learned_ambiguity_matrix`) - confirmed by a direct gradient check (`tests/test_cs_supcon.py`-style: backward through a loss using the matrix leaves `matrix.grad is None`).
+
+**Reference representation**: `src/training/ambiguity_setup.py: build_learned_class_ambiguity` loads the **existing, already-fully-trained AA-EvidentNet checkpoint** (Phase 1's chosen frozen development representation - see the design discussion in this branch's conversation history for why this was preferred over training a dedicated CS-SupCon-disabled checkpoint: it requires no new GPU compute, and its weights were already fit without any test-set access, so reusing them introduces no test leakage) into its **own, throwaway `create_model(...)` instance** - never the model the caller is about to train. Every parameter's `requires_grad` is explicitly forced to `False`, the model is placed in `eval()`, and the only forward passes performed are under `torch.inference_mode()` over `train_original.csv` (never `train_balanced.csv`, `val_original.csv`, or `test_original.csv`). Verified via `tests/test_ambiguity_setup.py`: `model.eval()` is called (spy), no optimizer is ever constructed (spy on `AdamW.__init__`), no backward pass ever occurs (spy on `Tensor.backward`), every reference-model parameter has `requires_grad=False` after construction (direct check), and the reference checkpoint's file hash is unchanged before/after (it is never written to).
+
+**Methodological caveat (stated in the module docstring, `configs/losses.yaml`, and here - not hidden)**: this reference checkpoint's embedding space was itself shaped by the *existing* fixed-hard-pair CS-SupCon objective. The learned matrix therefore reflects class geometry *after* that correction has already partially acted on it - it is **not** claimed to be a from-scratch, assumption-free measurement of natural class confusability, and is **not** claimed to be independent of the previous ambiguity mechanism.
+
+### Sample-level ambiguity: exact equation and behavior (analysis-only)
+
+```
+sim_i,k      = cosine_similarity(z_i, P_k)
+raw_margin_i = sim_i,(1) - sim_i,(2)                (top-2 raw cosine-similarity gap, [0,2])
+ambiguity_i  = 1 - clip((raw_margin_i - margin_min)/(margin_max - margin_min), 0, 1)
+```
+
+`margin_min`/`margin_max` (`fit_margin_normalization`) are fit once from `train_original.csv`'s own raw-margin distribution - the same forward pass used for the prototypes, never validation or test. `competing_class_i = argmax_{k != top1} sim_i,k`, computed from raw (pre-softmax) similarities, so its identity is provably temperature-independent (verified: `tests/test_ambiguity.py::test_competing_class_identity_is_temperature_independent` computes it at two wildly different `entropy_temperature` values and confirms an identical result).
+
+**A numerical check was done before implementing this formula** (per explicit review): does a pure top-2 softmax margin genuinely approach 0 for an easy sample despite K=10 classes? Verified yes - a dominant top-1 class yields a near-1 margin regardless of K, since only the top-2 values matter. The formula was still revised to drop the softmax/temperature dependency entirely for the *primary* scalar (using the raw cosine margin, min-max normalized from train-original statistics instead - removing an uncalibrated hyperparameter), and a secondary diagnostic was added specifically because the margin *does* have a real, verified blind spot: it cannot distinguish a sharp two-way tie from a diffuse four-way confusion (both can produce a similarly small margin). `tests/test_ambiguity.py::test_entropy_distinguishes_two_way_tie_from_diffuse_confusion` encodes this numerically: a two-way near-tie among 10 classes produces a lower normalized entropy than a four-way near-tie, even though both produce a comparably small raw margin.
+
+`ambiguity_i`/`competing_class_i` depend only on each sample's own embedding - never on a true or predicted label - so the same computation applies at development-time analysis and at any future inference use without a label-dependent branch.
+
+### CS-SupCon: `ambiguity_source` modes
+
+`configs/losses.yaml: cs_supcon.ambiguity_source` is restricted to exactly `{"fixed_pairs", "learned_class"}` in this phase - `"learned_class_sample"` is recognized (not treated as a config typo) but explicitly raises a clear "not implemented in this phase" error, per the explicit instruction that sample-level ambiguity must be validated as meaningful before it is allowed to influence optimization.
+
+- **`fixed_pairs`** (default): unchanged. **Backward compatibility was verified two ways**: (1) all 46 pre-existing `tests/test_cs_supcon.py` tests and all 27 pre-existing `tests/test_combined_loss.py` tests pass unmodified; (2) a direct numerical check confirmed `ambiguity_source="learned_class"` with `ambiguity_scale * A[a,b] = ambiguity_weight - 1` for a given pair produces a bit-identical loss value to the equivalent `fixed_pairs` configuration on the same synthetic batch - i.e. `learned_class` is a strict generalization of `fixed_pairs`, not an independently-reimplemented formula.
+- **`learned_class`**: `w(i,a) = 1 + ambiguity_scale * A[y_i, y_a]` for negatives (`y_i != y_a`); positives and self are handled identically to the `fixed_pairs` branch (unchanged code, not re-derived). Calling `forward()` in this mode before `set_learned_ambiguity_matrix(...)` raises `CSSupConConfigError` rather than silently defaulting to uniform weighting.
+
+### Training integration (`src/training/run_aa_evidentnet.py`) - no `Trainer` changes
+
+The entire mechanism is orchestrated in `run_aa_evidentnet_training`, entirely **before** `optimizer`/`scheduler`/`Trainer` are constructed - `src/training/trainer.py` was not modified at all (no new hook, no epoch-dependent recomputation, no periodic update). `ambiguity_source="fixed_pairs"` performs zero setup and requires no reference checkpoint (verified: `tests/test_run_aa_evidentnet_ambiguity.py::test_fixed_pairs_requires_no_reference_checkpoint_and_performs_no_setup` monkeypatches `build_learned_class_ambiguity` and confirms it is never called). `ambiguity_source="learned_class"` builds the matrix once, installs it into `criterion.cs_supcon_loss`, and writes a `results/logs/<run_id>/ambiguity_metadata.json` reproducibility artifact (reference checkpoint path + SHA-256, train manifest path + SHA-256, per-class sample counts, margin normalization, the full matrix, and the methodological caveat above) before `trainer.fit()` is ever called - verified via a spy on `Trainer.fit()` recording that the matrix had already been built by the time training started. `smoke_test=True` combined with `ambiguity_source="learned_class"` raises a clear `RunAAEvidentNetError` (smoke-test's synthetic data provides no real `train_original.csv` or reference checkpoint) rather than silently falling back to `fixed_pairs` or fabricating synthetic prototypes.
+
+### Validation-only development protocol (train_original.csv + val_original.csv ONLY)
+
+`src/evaluation/ambiguity_validation.py: run_ambiguity_validation` answers "is sample ambiguity meaningful?" using the SAME frozen reference checkpoint and the artifact already built by `ambiguity_setup`, forward-passing `val_original.csv` exactly once (read-only, `eval()`, `torch.inference_mode()`, no optimizer, no backward pass - verified by the same spy-based tests used elsewhere in this project). Seven analyses, all validation-only: error-detection AUROC/AUPRC of ambiguity vs. misclassification; competing-class hit rate among errors; ambiguity mean/median for correct vs. incorrect predictions; ambiguity mean/median for the existing fixed hard-pair classes vs. others; Spearman correlation between ambiguity and EDL uncertainty (reusing `ood_uncertainty.py`'s own `_spearman` via same-package cross-import, the established convention); a 2×2 ambiguity/EDL-uncertainty quadrant error-rate breakdown; and a ranking comparison (never a construction input) between the learned matrix and an ordinary validation confusion matrix. Outputs: `results/ambiguity/<run_id>/class_ambiguity_matrix.csv`, `validation_metrics.json`, `metadata.json`.
+
+**The function signature has no test-manifest parameter at all** (`tests/test_ambiguity_validation.py::test_run_ambiguity_validation_has_no_test_manifest_parameter` checks this structurally, not by a fragile text search over the module source - the module's own docstring correctly *mentions* `test_original.csv` in prose to explain that it is never used, which a naive substring check would have flagged as a false positive). A separate test confirms the full analysis succeeds with no `test_original.csv` present in the fixture at all.
+
+### Tests added
+
+`tests/test_prototypes.py` (10), `tests/test_ambiguity.py` (33), `tests/test_ambiguity_setup.py` (14), `tests/test_ambiguity_validation.py` (18), `tests/test_run_aa_evidentnet_ambiguity.py` (6) - 81 new tests, all using tiny synthetic fixtures under `tmp_path`. **No test in this entire feature ever reads, requires, or references `data/manifests/test_original.csv`.**
+
+### Confirmations
+
+- `data/manifests/test_original.csv` was never opened during this work - confirmed by its unchanged mtime and unchanged file count (5,335) in `data/raw/`.
+- No `final_test`, `robustness`, or `ood_uncertainty` evaluation was run as part of this work.
+- No training run (real or smoke-test-scale, beyond what the tests themselves execute against synthetic data) was performed against the real dataset.
+- No performance or novelty claims are made anywhere in this feature's code, configuration, or documentation.
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.

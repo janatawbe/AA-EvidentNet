@@ -91,6 +91,16 @@ cs_supcon:
   ambiguity_source: fixed_pairs
   ambiguity_scale: 1.0
 
+  # Required ONLY when ambiguity_source=learned_class - path to the
+  # existing, already-frozen AA-EvidentNet checkpoint whose embeddings
+  # (over train_original.csv only) are used to build the class-ambiguity
+  # matrix (src/training/ambiguity_setup.py). No default is provided
+  # (null): a missing value fails loudly with a clear config error rather
+  # than silently skipping the mechanism. Unused, and never validated,
+  # when ambiguity_source=fixed_pairs.
+  reference_checkpoint_path: null
+  reference_model_name: aa_evidentnet
+
 # ---------------------------------------------------------------------------
 # EDL: Evidential Deep Learning (Task 9).
 #

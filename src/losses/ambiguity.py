@@ -102,20 +102,35 @@ class AmbiguityComputationError(Exception):
     competing-class computation)."""
 
 
+DEFAULT_REFERENCE_MODEL_NAME = "aa_evidentnet"
+
+
 @dataclass(frozen=True)
 class AmbiguitySettings:
     ambiguity_source: str
     ambiguity_scale: float
+    reference_checkpoint_path: Any = None
+    reference_model_name: str = DEFAULT_REFERENCE_MODEL_NAME
 
 
 def load_ambiguity_settings(cs_supcon_section: Dict[str, Any]) -> AmbiguitySettings:
-    """Parse+validate the `ambiguity_source`/`ambiguity_scale` fields of
+    """Parse+validate the `ambiguity_source`/`ambiguity_scale`/
+    `reference_checkpoint_path`/`reference_model_name` fields of
     configs/losses.yaml: cs_supcon. `learned_class_sample` is recognized
     (not treated as an unknown-value typo) but explicitly rejected as not
     yet implemented in this phase - see module docstring - rather than
-    silently falling back to a different mode."""
+    silently falling back to a different mode.
+
+    `reference_checkpoint_path` (the existing, already-frozen AA-EvidentNet
+    checkpoint used to build the learned class-ambiguity matrix - see
+    src/training/ambiguity_setup.py) is REQUIRED when
+    `ambiguity_source == 'learned_class'` - there is no meaningful default,
+    and silently proceeding without one would mean silently skipping the
+    entire mechanism rather than failing loudly."""
     ambiguity_source = cs_supcon_section.get("ambiguity_source", "fixed_pairs") or "fixed_pairs"
     ambiguity_scale = float(cs_supcon_section.get("ambiguity_scale", DEFAULT_AMBIGUITY_SCALE))
+    reference_checkpoint_path = cs_supcon_section.get("reference_checkpoint_path")
+    reference_model_name = cs_supcon_section.get("reference_model_name", DEFAULT_REFERENCE_MODEL_NAME) or DEFAULT_REFERENCE_MODEL_NAME
 
     if ambiguity_source == "learned_class_sample":
         raise AmbiguityConfigError(
@@ -128,10 +143,22 @@ def load_ambiguity_settings(cs_supcon_section: Dict[str, Any]) -> AmbiguitySetti
             f"cs_supcon.ambiguity_source='{ambiguity_source}' is not recognized. "
             f"Valid values: {VALID_AMBIGUITY_SOURCES}."
         )
-    if ambiguity_source == "learned_class" and ambiguity_scale <= 0:
-        raise AmbiguityConfigError(f"cs_supcon.ambiguity_scale must be > 0, got {ambiguity_scale}")
+    if ambiguity_source == "learned_class":
+        if ambiguity_scale <= 0:
+            raise AmbiguityConfigError(f"cs_supcon.ambiguity_scale must be > 0, got {ambiguity_scale}")
+        if not reference_checkpoint_path:
+            raise AmbiguityConfigError(
+                "cs_supcon.reference_checkpoint_path is required when ambiguity_source='learned_class' "
+                "(the existing, already-frozen AA-EvidentNet checkpoint used to build the class-ambiguity "
+                "matrix - see src/training/ambiguity_setup.py). Refusing to silently skip the mechanism."
+            )
 
-    return AmbiguitySettings(ambiguity_source=ambiguity_source, ambiguity_scale=ambiguity_scale)
+    return AmbiguitySettings(
+        ambiguity_source=ambiguity_source,
+        ambiguity_scale=ambiguity_scale,
+        reference_checkpoint_path=reference_checkpoint_path,
+        reference_model_name=reference_model_name,
+    )
 
 
 def _l2_normalize_rows(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:

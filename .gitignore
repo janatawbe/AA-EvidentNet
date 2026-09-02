@@ -18,6 +18,7 @@ results/tables/*
 results/figures/*
 results/robustness/*
 results/ood_uncertainty/*
+results/ambiguity/*
 !results/**/.gitkeep
 
 # Python

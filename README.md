@@ -1143,6 +1143,71 @@ Every invocation generates a fresh `run_id` (`ood_uncertainty_aa_evidentnet_seed
 
 Retrain, tune, or modify AA-EvidentNet's weights; use `test_original.csv` for any calibration decision (prototypes, normalization, or weight selection — all three come from train/val only); touch `experiments/registry.csv`; overwrite or rerun `final_test`'s or `robustness`'s outputs; support any model other than `aa_evidentnet` (baselines are explicitly rejected).
 
+## Learned class-level ambiguity (`feature/learned-ambiguity`, Phase 1: `src/losses/ambiguity.py`, `src/models/prototypes.py`, `src/training/ambiguity_setup.py`, `src/evaluation/ambiguity_validation.py`)
+
+**Four deliberately separate concepts — never combined into one score:**
+
+| Concept | Question it answers | Where it lives |
+|---|---|---|
+| **Class ambiguity** | Which disease classes have overlapping learned representations, in general? | A static, symmetric K×K matrix, frozen once per run |
+| **Sample ambiguity** | Which competing disease classes does *this specific image* resemble? | A per-image scalar + competing class — **analysis-only in this phase**, does not affect training |
+| **EDL uncertainty** | How strongly supported is the model's prediction? | `src/losses/evidential.py` — unmodified, untouched by this work |
+| **OOD score** | How unlike the training distribution is this image? | `src/evaluation/ood_uncertainty.py` — unmodified, untouched by this work |
+
+This is a new experimental research direction, not a replacement for the existing fixed hard-pair CS-SupCon mechanism — the original 3 clinician-picked pairs (`configs/losses.yaml: cs_supcon.ambiguity_pairs`) are preserved unchanged, and the new mechanism is opt-in via `cs_supcon.ambiguity_source`.
+
+### Class-level ambiguity: exact construction
+
+```
+P_k    = mean fused embedding of class k, over train_original.csv ONLY (no augmented samples, no validation, no test)
+S(a,b) = cosine_similarity(P_a, P_b)                      in [-1, 1]
+A[a,b] = max(0, S(a,b))   for a ≠ b                        rectified, in [0, 1], symmetric
+A[a,a] = 0                                                  diagonal, explicit, never queried
+```
+
+Built purely from embedding geometry — **never from a confusion matrix, predictions, or errors** — which is what keeps "these classes look alike" (ambiguity) conceptually distinct from "the model gets these wrong" (uncertainty/uncertainty-like signals). Stored as a non-trainable registered buffer (`requires_grad=False`) — never updated by an optimizer or backward pass.
+
+**Reference representation (Phase 1)**: the prototypes are computed from the **existing, already-frozen, already-fully-trained AA-EvidentNet checkpoint** — loaded strictly read-only (`eval()`, `torch.inference_mode()`, every parameter's `requires_grad` forced to `False`) into its own throwaway model instance that is never the model being trained and is discarded immediately after use. This is deliberate: the matrix must be established *before* the new ambiguity-aware objective exists, so it can never be shaped by (and therefore never circularly reinforce) the very training run it's about to influence.
+
+**Methodological caveat, stated plainly**: that reference checkpoint's own embedding space was itself shaped by the *existing* fixed-hard-pair CS-SupCon objective (`ambiguity_weight=2.0` on the 3 clinician pairs). The learned matrix therefore reflects class geometry **after** that existing correction has already partially acted — it is **not** claimed to be a from-scratch, assumption-free measurement of natural class confusability, and is **not** claimed to be independent of the previous ambiguity mechanism. (A CS-SupCon-disabled reference checkpoint would remove this pre-conditioning but requires new training compute — noted as a possible future robustness check, not implemented here.)
+
+### Sample-level ambiguity: exact equation (analysis-only — does not influence training loss in this phase)
+
+```
+sim_i,k      = cosine_similarity(z_i, P_k)                 for k = 1..K
+raw_margin_i = sim_i,(1) - sim_i,(2)                        top-2 gap in raw cosine similarity, [0, 2]
+ambiguity_i  = 1 - clip((raw_margin_i - margin_min) / (margin_max - margin_min), 0, 1)      in [0, 1]
+```
+
+`margin_min`/`margin_max` are fit once from **train_original.csv's own** raw-margin distribution (never validation or test) — the same min-max fitting convention `ood_uncertainty.py` already established. `competing_class_i = argmax_{k≠top1} sim_i,k` — temperature-independent (softmax is rank-preserving), computed directly from raw similarities. Also reported: the full competing-class similarity vector and a **secondary diagnostic**, normalized entropy `H_i/ln(K)` of `softmax_k(sim_i,k/τ)` — kept separate from the primary score because a pure top-2 margin cannot distinguish a sharp two-way tie from a diffuse many-way confusion (verified numerically; see REPRODUCIBILITY.md).
+
+**`ambiguity_i`/`competing_class_i` depend only on the embedding's own geometry — never on a true or predicted label** — so the identical computation applies at development-time analysis and at any future inference use.
+
+### CS-SupCon extension
+
+`configs/losses.yaml: cs_supcon.ambiguity_source` selects exactly one of two modes (a third, `learned_class_sample`, is recognized but explicitly rejected as not-yet-implemented — sample ambiguity must first be validated as meaningful before it's allowed to influence optimization):
+
+- **`fixed_pairs`** (default — zero behavior change from before this field existed): `w(i,a) = ambiguity_weight` if `(y_i, y_a)` is a configured hard pair, else `1.0`.
+- **`learned_class`**: `w(i,a) = 1 + ambiguity_scale * A[y_i, y_a]` for negatives. Positive handling, self-masking, log-sum-exp stability, embedding normalization, and temperature behavior are all completely unchanged from the existing implementation.
+
+### Validation-only development protocol (train_original.csv + val_original.csv ONLY — never test)
+
+`src/evaluation/ambiguity_validation.py` answers "is sample ambiguity actually meaningful?" using **only** the same frozen reference checkpoint + `val_original.csv`, entirely independent of running any new training:
+
+1. Error-detection AUROC/AUPRC of ambiguity vs. validation misclassification.
+2. Competing-class hit rate: among errors, how often is the model's actual wrong prediction the sample's identified competitor?
+3. Ambiguity distribution (mean/median) for correct vs. incorrect validation predictions.
+4. Ambiguity distribution for the existing hard-pair classes vs. all others.
+5. Spearman correlation between ambiguity and the model's own EDL uncertainty.
+6. A 2×2 quadrant breakdown (low/high ambiguity × low/high EDL uncertainty) reporting the validation error rate in each — directly operationalizing "does ambiguity carry information EDL uncertainty doesn't?"
+7. Ranking comparison (never a construction input) between the learned matrix's off-diagonal entries and an ordinary validation confusion matrix's off-diagonal entries — a sanity check against the existing hard pairs, not a way of building the matrix.
+
+Outputs: `results/ambiguity/<run_id>/class_ambiguity_matrix.csv`, `validation_metrics.json`, `metadata.json` — entirely separate from every other results directory.
+
+### What this mechanism deliberately does NOT do (Phase 1)
+
+Let sample-level ambiguity influence the training loss (analysis-only, by design, until validated); use `test_original.csv` for any construction, calibration, or validation decision; build the class matrix from a confusion matrix; recompute or update the matrix during training (it is frozen once, before training begins); modify `Trainer` (the mechanism is entirely orchestrated in `run_aa_evidentnet.py`, before `trainer.fit()` is ever called); claim performance improvements or novelty.
+
 ## Repository structure
 
 ```text
@@ -1162,7 +1227,7 @@ src/
   statistics/        Multi-seed aggregation, significance testing
   utils/             Reproducibility utilities (seeding, config hashing, git/env info)
 experiments/         One directory per experiment stage (00_data_audit ... 08_robustness)
-results/             logs/, checkpoints/, raw_predictions/, tables/, figures/, robustness/, ood_uncertainty/ (all currently empty)
+results/             logs/, checkpoints/, raw_predictions/, tables/, figures/, robustness/, ood_uncertainty/, ambiguity/ (all currently empty)
 paper/               figures/, tables/, supplementary/, references/ for the eventual write-up
 tests/               Unit tests for the utilities and CLI built so far
 run_pipeline.py      Single CLI entry point for all pipeline stages
