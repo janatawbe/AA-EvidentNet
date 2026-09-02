@@ -1,23 +1,28 @@
 """Shared class-prototype and cosine-distance utilities.
 
-Used by two independent, unrelated consumers that must never depend on
-each other:
+Used by multiple independent, unrelated consumers that must never depend
+on each other:
 
   - src/evaluation/ood_uncertainty.py (post-hoc feature-distance OOD
     detection on an already-frozen, already-finally-tested checkpoint)
-  - src/losses/ambiguity.py / src/training/ambiguity_setup.py (the learned
-    class-ambiguity mechanism, computed once before a NEW training run
-    begins)
+  - src/losses/ambiguity.py / src/training/ambiguity_setup.py (Phase 1:
+    the learned class-PROTOTYPE ambiguity mechanism, computed once before
+    a new training run begins)
+  - src/losses/neighborhood_ambiguity.py / src/training/
+    neighborhood_ambiguity_setup.py (Phase 2: the learned class-
+    NEIGHBORHOOD ambiguity mechanism - a separate, additional analysis,
+    not a replacement for Phase 1)
 
-Both need exactly the same two primitives - "mean embedding per class from
-a dataloader" and "cosine distance from an embedding to its nearest
-prototype" - so this module exists purely to hold that shared,
-dependency-free implementation once. It imports nothing from
-src/evaluation/ or src/losses/ (avoiding an upward/backward layering
-dependency in either direction) and is otherwise unopinionated about why a
-caller wants prototypes.
+All three need "run the model over a dataloader and collect per-sample
+fused embeddings" - so `extract_embeddings` exists here to hold that one
+shared forward-pass loop, rather than each Phase re-inlining a slightly
+different copy of it. This module imports nothing from src/evaluation/ or
+src/losses/ (avoiding an upward/backward layering dependency in either
+direction) and is otherwise unopinionated about why a caller wants
+embeddings/prototypes.
 """
 
+from dataclasses import dataclass
 from typing import List, Tuple
 
 import numpy as np
@@ -106,3 +111,64 @@ def compute_class_prototypes(
 
     prototypes = sums / counts[:, None]
     return prototypes, counts.tolist()
+
+
+@dataclass
+class ExtractedEmbeddings:
+    """Per-sample outputs of one forward pass over a dataloader. `labels`
+    are the manifest's true class indices; `predictions` are
+    argmax(logits); `uncertainty` is AA-EvidentNet's own EDL uncertainty
+    (`K / sum(dirichlet_alpha)`). `predictions`/`uncertainty` are always
+    populated (the extra cost is negligible - one argmax and one field
+    read per batch already computed by `return_features=True`), even for
+    a caller (e.g. Phase 1/Phase 2 prototype/neighborhood construction on
+    train_original.csv) that only needs `embeddings`/`labels` - this keeps
+    exactly one shared extraction loop rather than several near-duplicate
+    ones."""
+
+    embeddings: np.ndarray  # [N, D]
+    labels: np.ndarray  # [N] int
+    predictions: np.ndarray  # [N] int
+    uncertainty: np.ndarray  # [N] float, in (0, 1]
+
+
+def extract_embeddings(model: torch.nn.Module, loader, device: torch.device) -> ExtractedEmbeddings:
+    """One forward pass over `loader`, collecting per-sample fused
+    embeddings, true labels, argmax predictions, and EDL uncertainty - the
+    single shared extraction loop used by every ambiguity/OOD mechanism in
+    this project, so model-loading/forward-pass logic is never duplicated.
+
+    Caller is responsible for `model.eval()` and for ensuring `loader`
+    yields undistorted, non-augmented samples when that matters (e.g.
+    train_original.csv/val_original.csv with an eval-style transform) -
+    this function itself always runs under `torch.inference_mode()`
+    regardless. Raises PrototypeComputationError if the dataloader yields
+    zero batches (there is nothing meaningful to return)."""
+    embeddings_chunks: List[np.ndarray] = []
+    labels_chunks: List[np.ndarray] = []
+    predictions_chunks: List[np.ndarray] = []
+    uncertainty_chunks: List[np.ndarray] = []
+
+    with torch.inference_mode():
+        for batch in loader:
+            images = batch["image"].to(device)
+            labels = batch["label"]
+            labels_np = labels.detach().cpu().numpy() if torch.is_tensor(labels) else np.asarray(labels)
+
+            output = model(images, return_features=True)
+            preds = torch.argmax(output.logits, dim=1).detach().cpu().numpy()
+
+            embeddings_chunks.append(output.embedding.detach().cpu().numpy())
+            labels_chunks.append(np.asarray(labels_np, dtype=np.int64))
+            predictions_chunks.append(preds)
+            uncertainty_chunks.append(output.uncertainty.detach().cpu().numpy())
+
+    if not embeddings_chunks:
+        raise PrototypeComputationError("the dataloader produced zero batches - cannot extract embeddings")
+
+    return ExtractedEmbeddings(
+        embeddings=np.concatenate(embeddings_chunks, axis=0),
+        labels=np.concatenate(labels_chunks, axis=0),
+        predictions=np.concatenate(predictions_chunks, axis=0),
+        uncertainty=np.concatenate(uncertainty_chunks, axis=0),
+    )

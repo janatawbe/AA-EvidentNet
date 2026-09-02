@@ -832,6 +832,51 @@ The entire mechanism is orchestrated in `run_aa_evidentnet_training`, entirely *
 - No training run (real or smoke-test-scale, beyond what the tests themselves execute against synthetic data) was performed against the real dataset.
 - No performance or novelty claims are made anywhere in this feature's code, configuration, or documentation.
 
+## Phase 2: neighborhood-based learned ambiguity reproducibility (research only, `feature/learned-ambiguity`)
+
+**Motivation, from Phase 1's own validation run**: AUROC=0.5703292638, AUPRC=0.2040891098, matrix-vs-confusion Spearman=0.3068058483, competing-class hit rate=0.0117647059, and — the specific weakness this phase investigates — the single largest observed validation confusion (Healthy ↔ Glaucoma, 35 confusions) was not strongly identified by class-prototype cosine similarity. This phase does not assume neighborhood-based ambiguity is better; it exists to measure whether it is, using the numbers actually produced by running it (see "Not yet run against real data" below).
+
+**Phase 1 was not modified in any way** to build this phase — `src/losses/ambiguity.py`, `src/training/ambiguity_setup.py`, `src/evaluation/ambiguity_validation.py` are untouched, and all of Phase 1's own tests (`tests/test_ambiguity.py` 33, `tests/test_ambiguity_setup.py` 14, `tests/test_ambiguity_validation.py` 18, `tests/test_prototypes.py`'s original 10) were re-run unmodified and still pass, confirming zero regression.
+
+### Shared extraction utility (additive only)
+
+`src/models/prototypes.py` gained one new function, `extract_embeddings` (returning per-sample embeddings, labels, argmax predictions, and EDL uncertainty from one forward pass) - purely additive; `compute_class_prototypes` and `nearest_prototype_cosine_distance` (Phase 1's own functions) were not changed at all. This is the single shared extraction loop Phase 2 uses instead of re-inlining a near-duplicate copy of Phase 1's existing forward-pass loops (which themselves remain as they were, untouched, in `ambiguity_setup.py`/`ambiguity_validation.py`).
+
+### Class-level neighborhood matrix: exact construction and complexity
+
+`src/losses/neighborhood_ambiguity.py` (pure math, no I/O, matching every other loss module's purity convention):
+
+- `find_cross_class_neighbors(embeddings, labels, k)`: for every sample, the k highest-cosine-similarity samples with a *different* class label (self and same-class samples excluded by construction, not by post-hoc filtering). Computed via one `[N, D] @ [D, N]` matrix multiplication (`N=3075` train samples in the real dataset → an `[N, N]` similarity matrix of a few tens of MB) - never an `[N, N, D]` tensor. Raises `NeighborhoodAmbiguityError` if fewer than k cross-class candidates exist for any sample, rather than silently returning a truncated/inconsistent neighbor list.
+- `compute_neighborhood_class_matrix`: `score(a->b) = mean over class-a samples of (sum over their top-k cross-class neighbors in class b of max(0,cosine)) / k`, symmetrized, zero diagonal, then min-max rescaled using **only the matrix's own off-diagonal entries** (verified in tests to use the full [0,1] range, and to return an all-zero matrix rather than dividing by zero in the degenerate case where every pair is equally (dis)similar).
+- `compute_sample_neighborhood_ambiguity`: per train sample, nearest competing class (rank-1 neighbor's class), mean top-k similarity, per-class neighbor fraction, and strongest competing class (mode of the k neighbors' classes, which can differ from the single nearest neighbor's class - both are reported, verified independently in tests).
+
+### Validation sample ambiguity: exact equation and why no additional normalization is fit
+
+`compute_validation_neighborhood_ambiguity`: for each validation embedding, the k overall nearest **train** embeddings (same-class neighbors allowed, unlike the class-matrix construction above - a validation sample deep in its own class's neighborhood must be able to read as low-ambiguity, which requires letting same-class train neighbors count towards `p_c`). `margin = p_(1)-p_(2)`; `ambiguity_margin = 1-margin` (PRIMARY, for direct consistency with Phase 1's own top-1-vs-top-2 margin choice); `ambiguity_entropy = H(p)/log(K)` (secondary). Both are proportions/probabilities, hence already bounded in [0,1] by construction - unlike Phase 1's raw cosine margin (which genuinely needed empirical min-max fitting since cosine-similarity gaps have no natural [0,1] bound), no additional train-fitted normalization constant is needed or computed here, and this is stated explicitly rather than silently omitted. `competing_class` is rank-2 of `p_c` (ties broken toward the lower class index via a stable sort) - computed purely from embedding geometry, never from a true or predicted label, exactly like Phase 1's own competing-class rule.
+
+### Orchestration and leakage safeguards (identical guarantees to Phase 1)
+
+`src/training/neighborhood_ambiguity_setup.py: build_neighborhood_class_ambiguity` loads the reference checkpoint read-only into its own throwaway model instance (`eval()`, every parameter's `requires_grad` forced `False`, no optimizer ever constructed, no backward pass ever occurs - all verified via the same spy-based tests used throughout this project), reads `train_original.csv` only, and returns an artifact carrying the full train embedding/label arrays forward (not just a per-class summary, unlike Phase 1's prototypes - the neighborhood method for validation genuinely needs the individual training embeddings to search against). `src/evaluation/neighborhood_ambiguity_validation.py: run_neighborhood_ambiguity_validation` reads `val_original.csv` only and has no test-manifest parameter at all (checked structurally in `tests/test_neighborhood_ambiguity_validation.py`, not by a fragile text search). Neither module imports anything capable of loading `test_original.csv`.
+
+### Comparison artifact
+
+`build_prototype_vs_neighborhood_comparison` reads Phase 1's **own already-saved** `validation_metrics.json`/`class_ambiguity_matrix.csv` (from a prior, separate `run_ambiguity_validation` call - never recomputed) and Phase 2's in-memory summary/matrix, and reports both methods' key metrics plus each of the three existing fixed hard pairs' rank and value in both matrices side by side. It makes no claim about which method is better - `tests/test_neighborhood_ambiguity_validation.py` verifies the output explicitly carries a disclaiming `"note"` field to this effect, and handles a pair whose class names don't exist in a given fixture gracefully (`None`/`None` rather than a crash).
+
+### Tests added
+
+`tests/test_neighborhood_ambiguity.py` (32 - neighbor exclusion of self/same-class, correctness against hand-computed toy embeddings, determinism, k-too-large rejection, class-matrix symmetry/zero-diagonal/bounds/degenerate-case handling, validation margin/entropy bounds, competing-class ranking, proof that validation samples never influence each other), `tests/test_neighborhood_ambiguity_setup.py` (14 - end-to-end correctness against independently-recomputed values, frozen-reference-model guarantees, train-only manifest dependency, checkpoint-never-modified, k-too-large-for-dataset), `tests/test_neighborhood_ambiguity_validation.py` (18 - end-to-end schema, bounded metrics, zero test-manifest dependency, comparison-artifact correctness) - 64 new tests, all synthetic-fixture-only. Phase 1's existing 81 ambiguity tests were re-run unmodified as the regression check for "Phase 1 behavior unchanged."
+
+### Not yet run against real data
+
+This entire phase was implemented and tested against tiny synthetic fixtures only, exactly like Phase 1 before it. The real reference checkpoint (`checkpoints/20260831_064112_aa_evidentnet_seed42_48c214/best.pt`, SHA-256 `800d6184416d77a2a2d1447680ca7869bb973d62fc361f15a6ddfa0e95be2c2a`) is a Colab-side artifact and is not present in this local repository - running `build_neighborhood_class_ambiguity` / `run_neighborhood_ambiguity_validation` against the real `train_original.csv` (3075 samples) / `val_original.csv` (880 samples) to get real numbers, and comparing them against Phase 1's real validation results, is a separate, later step for whoever holds that checkpoint (see README.md/this feature's PR description for the exact function calls).
+
+### Confirmations
+
+- `data/manifests/test_original.csv` was never opened during this work.
+- No training, fine-tuning, `final_test`, `robustness`, or `ood_uncertainty` evaluation was run.
+- Phase 1's files and test results are unchanged.
+- No performance or novelty claim is made about the neighborhood method - it has not yet been run against real data.
+
 ## Configuration hashing
 
 All hyperparameters live in `configs/*.yaml`, not hardcoded in source.

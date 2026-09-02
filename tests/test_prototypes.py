@@ -25,8 +25,10 @@ from src.data.records import write_csv
 from src.data.transforms import build_transforms_from_config
 from src.models.factory import create_model
 from src.models.prototypes import (
+    ExtractedEmbeddings,
     PrototypeComputationError,
     compute_class_prototypes,
+    extract_embeddings,
     nearest_prototype_cosine_distance,
 )
 from tests.conftest import make_image, write_min_dataset_config, write_min_models_config
@@ -205,3 +207,73 @@ def test_compute_class_prototypes_raises_for_missing_class(tmp_path):
 
     with pytest.raises(PrototypeComputationError, match=r"zero samples for class index"):
         compute_class_prototypes(model, loader, torch.device("cpu"), len(canonical_classes))
+
+
+# --- extract_embeddings (shared by Phase 1's ambiguity_setup/ambiguity_validation
+# and Phase 2's neighborhood_ambiguity_setup/neighborhood_ambiguity_validation) ---
+
+
+def test_extract_embeddings_shapes_and_types(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=3)
+    models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    model.eval()
+
+    dataset, loader = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    result = extract_embeddings(model, loader, torch.device("cpu"))
+
+    assert isinstance(result, ExtractedEmbeddings)
+    n = len(canonical_classes) * 3
+    assert result.embeddings.shape == (n, model.embedding_dim)
+    assert result.labels.shape == (n,)
+    assert result.predictions.shape == (n,)
+    assert result.uncertainty.shape == (n,)
+    assert np.all(result.uncertainty > 0.0) and np.all(result.uncertainty <= 1.0)
+
+
+def test_extract_embeddings_labels_match_manifest_classes(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=3)
+    models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    model.eval()
+
+    dataset, loader = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    result = extract_embeddings(model, loader, torch.device("cpu"))
+
+    counts = np.bincount(result.labels, minlength=len(canonical_classes))
+    assert list(counts) == [3] * len(canonical_classes)
+    assert set(result.labels.tolist()) <= set(range(len(canonical_classes)))
+
+
+def test_extract_embeddings_matches_compute_class_prototypes_embeddings(tmp_path):
+    # Cross-check: manually averaging extract_embeddings' per-sample
+    # embeddings by class must equal compute_class_prototypes' own output,
+    # proving both share consistent forward-pass semantics.
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=3)
+    models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    model.eval()
+
+    dataset, loader = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    prototypes, _ = compute_class_prototypes(model, loader, torch.device("cpu"), len(canonical_classes))
+
+    _, loader2 = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    result = extract_embeddings(model, loader2, torch.device("cpu"))
+
+    for k in range(len(canonical_classes)):
+        expected = result.embeddings[result.labels == k].mean(axis=0)
+        assert prototypes[k] == pytest.approx(expected, abs=1e-5)
+
+
+def test_extract_embeddings_raises_on_empty_loader(tmp_path):
+    dataset_cfg, models_cfg, canonical_classes, manifests_dir, raw_dir = _setup(tmp_path, n_per_class=1)
+    models_config = yaml.safe_load(models_cfg.read_text(encoding="utf-8"))
+    model = create_model("aa_evidentnet", models_config)
+    model.eval()
+
+    dataset, _ = _build_loader(dataset_cfg, canonical_classes, manifests_dir, raw_dir, tmp_path)
+    empty_loader = build_eval_dataloader(dataset, batch_size=4, num_workers=0)
+    empty_loader.dataset.rows = []  # force zero batches without touching real data
+
+    with pytest.raises(PrototypeComputationError, match="zero batches"):
+        extract_embeddings(model, empty_loader, torch.device("cpu"))

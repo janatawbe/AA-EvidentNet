@@ -1208,6 +1208,54 @@ Outputs: `results/ambiguity/<run_id>/class_ambiguity_matrix.csv`, `validation_me
 
 Let sample-level ambiguity influence the training loss (analysis-only, by design, until validated); use `test_original.csv` for any construction, calibration, or validation decision; build the class matrix from a confusion matrix; recompute or update the matrix during training (it is frozen once, before training begins); modify `Trainer` (the mechanism is entirely orchestrated in `run_aa_evidentnet.py`, before `trainer.fit()` is ever called); claim performance improvements or novelty.
 
+## Phase 2: neighborhood-based learned ambiguity (research only — `src/losses/neighborhood_ambiguity.py`, `src/training/neighborhood_ambiguity_setup.py`, `src/evaluation/neighborhood_ambiguity_validation.py`)
+
+**Motivation**: Phase 1's own validation run showed its largest weakness plainly — the single largest observed validation confusion (Healthy ↔ Glaucoma, 35 confusions) was *not* strongly flagged by class-prototype cosine similarity. Averaging every sample in a class into one centroid can hide a difficult boundary region where only a subset of that class's images actually sit close to the other class. Phase 2 tests whether looking at **local, cross-class nearest-neighbor structure** captures that boundary better than a **global class-center** comparison. **Phase 1 is kept completely intact** — nothing in Phase 1's files was modified — specifically so the two can be compared side by side.
+
+| | Prototype ambiguity (Phase 1) | Neighborhood ambiguity (Phase 2) |
+|---|---|---|
+| Class-level signal | Similarity between two classes' **mean** embeddings | How often classes' individual samples appear in **each other's nearest neighbors** |
+| Captures | Global, class-center overlap | Local, boundary-region overlap |
+| Sample-level signal | Margin to nearest vs. 2nd-nearest **prototype** | Margin/entropy of class proportions among **k nearest individual training samples** |
+
+**This is a research/analysis step only — not wired into CS-SupCon or any training objective.** No performance or novelty claim is made; the entire point is to measure whether this signal is more informative than Phase 1's, not to assume the answer before the validation numbers are actually reviewed.
+
+### Class-level neighborhood ambiguity: exact construction
+
+For each train sample, find its k nearest *other-class* neighbors (cosine similarity, excluding itself and same-class samples; k=10 by default, configurable):
+
+```
+score(a→b) = mean over samples i in class a of
+             [ sum over i's top-k cross-class neighbors j in class b of max(0, cosine(z_i,z_j)) / k ]
+A_sym[a,b] = (score(a→b) + score(b→a)) / 2        for a ≠ b
+A_sym[a,a] = 0
+A[a,b]     = min-max rescale of A_sym's OWN off-diagonal entries to [0,1]     (train-derived only)
+```
+
+Symmetric, bounded [0,1], zero diagonal, deterministic — built entirely from `train_original.csv` embeddings, never from validation/test data or a confusion matrix.
+
+### Validation sample ambiguity: exact equation
+
+For each validation embedding, find the k overall nearest **training** embeddings (same-class neighbors *are* allowed here — unlike the class-matrix construction — so a sample sitting deep inside its own class's neighborhood correctly reads as low-ambiguity). Let `p_c` = fraction of those k neighbors belonging to class c:
+
+```
+margin            = p_(1) - p_(2)                (top-1 minus top-2 class proportions)
+ambiguity_margin  = 1 - margin                     in [0,1]     ← PRIMARY score
+ambiguity_entropy = H(p) / log(K)                  in [0,1]     ← secondary diagnostic
+```
+
+Both are proportions/probabilities and therefore already bounded in [0,1] by construction — no additional train-fitted normalization constant is required for either. The margin is chosen as primary for direct consistency with Phase 1's own top-1-vs-top-2 margin choice, making the two phases' scores comparable.
+
+### Validation-only protocol and comparison (train_original.csv + val_original.csv ONLY)
+
+Runs the same kind of analyses as Phase 1 (error-detection AUROC/AUPRC, correct-vs-incorrect ambiguity, hard-pair-class ambiguity, Spearman vs. EDL uncertainty, ambiguity/EDL quadrants, matrix-vs-confusion ranking, top ambiguous pairs) using the neighborhood score instead of the prototype score, plus a `build_prototype_vs_neighborhood_comparison` function that reads Phase 1's own saved artifacts and reports both methods' numbers side by side — including exactly where each of the three existing fixed hard pairs ranks in each matrix. **This comparison makes no claim about which method is better; it only reports the numbers.**
+
+Outputs (a separate run directory from Phase 1's): `results/ambiguity/<run_id>/neighborhood_class_ambiguity_matrix.csv`, `neighborhood_validation_metrics.json`, `neighborhood_metadata.json`, and `prototype_vs_neighborhood_comparison.json`.
+
+### What Phase 2 deliberately does NOT do
+
+Wire into `CSSupConLoss`, `run_aa_evidentnet.py`, or any training objective; use `test_original.csv` anywhere; build the matrix from validation confusion; modify any Phase 1 file; retrain or fine-tune anything; claim the neighborhood method outperforms the prototype method (that requires actually reviewing the validation numbers, which is the next step, not this one).
+
 ## Repository structure
 
 ```text
